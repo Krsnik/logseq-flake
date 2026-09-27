@@ -1,0 +1,57 @@
+{
+  "realm": "logseq",
+  "enabled": true,
+
+  "clients": [
+    {
+      "clientId": "logseq",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:*", "logseq://*"],
+      "webOrigins": ["*"],
+
+      "defaultClientScopes": ["basic", "acr", "profile", "email", "web-origins"],
+      "protocolMappers": [
+        {
+          "name": "logseq-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "logseq",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "logseq-username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "cognito:username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "test",
+      "enabled": true,
+      "email": "test@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "User",
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "test", "temporary": false }]
+    }
+  ]
+}

@@ -1,0 +1,275 @@
+{
+  "nodes": {
+    "clj-fractional-indexing-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1748292782,
+        "narHash": "sha256-H1pdNX+YbIpwd49L7/ku6YeXp0Jv6BmHZRQdRqopQwc=",
+        "owner": "logseq",
+        "repo": "clj-fractional-indexing",
+        "rev": "1087f0fb18aa8e25ee3bbbb0db983b7a29bce270",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "clj-fractional-indexing",
+        "rev": "1087f0fb18aa8e25ee3bbbb0db983b7a29bce270",
+        "type": "github"
+      }
+    },
+    "cljc-fsrs-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1758764298,
+        "narHash": "sha256-C/SvcUTC9BS61T3XWJjolZFrYHwhu5vdrGtAsz1qePA=",
+        "owner": "open-spaced-repetition",
+        "repo": "cljc-fsrs",
+        "rev": "eeef3520df664e51c3d0ba2031ec2ba071635442",
+        "type": "github"
+      },
+      "original": {
+        "owner": "open-spaced-repetition",
+        "repo": "cljc-fsrs",
+        "rev": "eeef3520df664e51c3d0ba2031ec2ba071635442",
+        "type": "github"
+      }
+    },
+    "cljs-http-missionary-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1732682554,
+        "narHash": "sha256-3L6R8LQxhqsm5gjGqMxUtROGg/QV1ikRFEgKYcrcKGM=",
+        "owner": "RCmerci",
+        "repo": "cljs-http-missionary",
+        "rev": "d61ce7e29186de021a2a453a8cee68efb5a88440",
+        "type": "github"
+      },
+      "original": {
+        "owner": "RCmerci",
+        "repo": "cljs-http-missionary",
+        "rev": "d61ce7e29186de021a2a453a8cee68efb5a88440",
+        "type": "github"
+      }
+    },
+    "cljs-time-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1612349198,
+        "narHash": "sha256-IApL+SEm7AhbTN7J/1KiAKTx7rd53hchRh3jmPQ412g=",
+        "owner": "logseq",
+        "repo": "cljs-time",
+        "rev": "5704fbf48d3478eedcf24d458c8964b3c2fd59a9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "cljs-time",
+        "rev": "5704fbf48d3478eedcf24d458c8964b3c2fd59a9",
+        "type": "github"
+      }
+    },
+    "datascript-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777783861,
+        "narHash": "sha256-hFO/uUzO9hISSD5tEGkHhN56+GD6RtOUZGCNwWXlVCQ=",
+        "owner": "logseq",
+        "repo": "datascript",
+        "rev": "3f141af97b70e1f14c65eaa119acd822ebece37e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "datascript",
+        "rev": "3f141af97b70e1f14c65eaa119acd822ebece37e",
+        "type": "github"
+      }
+    },
+    "flake-parts": {
+      "inputs": {
+        "nixpkgs-lib": "nixpkgs-lib"
+      },
+      "locked": {
+        "lastModified": 1788450739,
+        "narHash": "sha256-glZLQlzIn1fXH6PazR2iUmTo7kzzyYSshrWhLS9TqCU=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "31729ca8cbdb4fa927b34e5f4353e6a83f39e993",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
+    "glogi-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1732873521,
+        "narHash": "sha256-80hwqNABpeURdICwArbkdsBPTkDnGqXbqfk9JvyeTsU=",
+        "owner": "lambdaisland",
+        "repo": "glogi",
+        "rev": "30328a045141717aadbbb693465aed55f0904976",
+        "type": "github"
+      },
+      "original": {
+        "owner": "lambdaisland",
+        "repo": "glogi",
+        "rev": "30328a045141717aadbbb693465aed55f0904976",
+        "type": "github"
+      }
+    },
+    "hsx-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780628200,
+        "narHash": "sha256-uzlqVCilfpyHgbKd1M+mP6u3+0eTUBKbeclCCQWQMYg=",
+        "owner": "logseq",
+        "repo": "hsx",
+        "rev": "21615ffa2aa530cc830e3464b793a53ef4fdd18c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "hsx",
+        "rev": "21615ffa2aa530cc830e3464b793a53ef4fdd18c",
+        "type": "github"
+      }
+    },
+    "import-tree": {
+      "locked": {
+        "lastModified": 1788467110,
+        "narHash": "sha256-ljEMTXP/rH0tOvDzc9gzwww6KcHRPRnEHzd9lK48V7s=",
+        "owner": "denful",
+        "repo": "import-tree",
+        "rev": "eb1b52eaecc57f7c136d07ae8a93e724dfecac46",
+        "type": "github"
+      },
+      "original": {
+        "owner": "denful",
+        "repo": "import-tree",
+        "type": "github"
+      }
+    },
+    "logseq-schema-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1767875079,
+        "narHash": "sha256-ZFinS8+GGDx+JulwW1PGgN5Jo2wFc1P55IoMHMKrLG4=",
+        "owner": "logseq",
+        "repo": "logseq-schema",
+        "rev": "6eeb51cd6d80bbffa0873c1e79790dc1f4ff68cf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "logseq-schema",
+        "rev": "6eeb51cd6d80bbffa0873c1e79790dc1f4ff68cf",
+        "type": "github"
+      }
+    },
+    "logseq-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783949719,
+        "narHash": "sha256-egierIhPRm3J8NL1gAcAMvynzFTzoSzpeGN6m0aOSSI=",
+        "owner": "logseq",
+        "repo": "logseq",
+        "rev": "26f6f7880b1ec894871a9ec2c03bb97b954b4cb0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "ref": "2.0.1",
+        "repo": "logseq",
+        "type": "github"
+      }
+    },
+    "malli-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1775746002,
+        "narHash": "sha256-gIICk3ZXTYxsBOOl+49M9+a98z9rl0JXj1/2LEGiD74=",
+        "owner": "metosin",
+        "repo": "malli",
+        "rev": "52ea58a36ff5172b38dfc526ca638afa7226a4a0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metosin",
+        "repo": "malli",
+        "rev": "52ea58a36ff5172b38dfc526ca638afa7226a4a0",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790463110,
+        "narHash": "sha256-hKlVl12B1dF0Q5vd9dY3lIJM5mFGWYSlXwSLAqHZ1+s=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "e158d9ed9b51c98974c5e66e1ba1c9e0255fecaa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-lib": {
+      "locked": {
+        "lastModified": 1788057806,
+        "narHash": "sha256-DTQSMxzDWmT0zhguthvegnVkn7CFqGCv4IHCzk5ZUpM=",
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "rev": "596e2e3940e09b2abbeb03f75fa1828c57fcd72c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "nixpkgs.lib",
+        "type": "github"
+      }
+    },
+    "rfx-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780424896,
+        "narHash": "sha256-ZWxELDRFqdUC9JOVR1qkq9sZLlg/kAOYSxsSI9E9Xz0=",
+        "owner": "logseq",
+        "repo": "rfx",
+        "rev": "d37aaceb37fcaf969c5cd04646dfdb985d65d3c2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logseq",
+        "repo": "rfx",
+        "rev": "d37aaceb37fcaf969c5cd04646dfdb985d65d3c2",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "clj-fractional-indexing-src": "clj-fractional-indexing-src",
+        "cljc-fsrs-src": "cljc-fsrs-src",
+        "cljs-http-missionary-src": "cljs-http-missionary-src",
+        "cljs-time-src": "cljs-time-src",
+        "datascript-src": "datascript-src",
+        "flake-parts": "flake-parts",
+        "glogi-src": "glogi-src",
+        "hsx-src": "hsx-src",
+        "import-tree": "import-tree",
+        "logseq-schema-src": "logseq-schema-src",
+        "logseq-src": "logseq-src",
+        "malli-src": "malli-src",
+        "nixpkgs": "nixpkgs",
+        "rfx-src": "rfx-src"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

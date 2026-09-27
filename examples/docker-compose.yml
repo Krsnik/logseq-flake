@@ -1,0 +1,86 @@
+# Self-hosted Logseq: web app + sync server + publish service.
+#
+# Works with docker compose and podman-compose alike. The images are built by
+# this flake, not pulled from a registry:
+#
+#   nix build path:.#logseq-webapp-image  && podman load -i result
+#   nix build path:.#logseq-sync-image    && podman load -i result
+#   nix build path:.#logseq-publish-image && podman load -i result
+#
+# Then point the three LOGSEQ_OIDC_* variables at your identity provider (a .env
+# file beside this one works) and `docker compose up -d`. They have no defaults
+# on purpose: falling back to upstream's Cognito pool is exactly what this
+# packaging exists to avoid, so compose fails loudly instead.
+#
+#   LOGSEQ_OIDC_ISSUER=https://idp.example.org/realms/logseq
+#   LOGSEQ_OIDC_CLIENT_ID=logseq
+#   LOGSEQ_OIDC_JWKS_URL=https://idp.example.org/realms/logseq/protocol/openid-connect/certs
+#
+# Any OIDC provider works for the two servers — ./keycloak.nix is a
+# worked Keycloak realm, and checks.sync/checks.publish prove it end to end.
+# The web app's *login UI* is a separate matter: it is aws-amplify talking
+# Cognito's own API, so it cannot sign in against a non-Cognito provider and no
+# setting here changes that. See "Identity providers" in ../README.md.
+#
+# The web app's endpoints are compiled into its bundle, so they are not settable
+# here. The image takes the same clientConfig the package does, so rebuild that
+# one image with your own:
+#
+#   logseq-webapp-image.override {
+#     clientConfig = {
+#       apiDomain = "api.example.org";
+#       syncHttpBase = "https://sync.example.org";
+#       syncWsUrl = "wss://sync.example.org/sync/%s";
+#       publishApiBase = "https://blog.example.org";
+#     };
+#   }
+services:
+  webapp:
+    image: localhost/logseq-webapp:latest
+    ports:
+      - "8080:8080"
+    # nginx forks its workers with setuid, which cap_drop: ALL removes, so this
+    # container starts unprivileged rather than dropping privileges itself.
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    read_only: true
+    tmpfs: [/tmp]
+    restart: unless-stopped
+  sync:
+    image: localhost/logseq-sync:latest
+    ports:
+      - "8081:8080"
+    environment:
+      COGNITO_ISSUER: ${LOGSEQ_OIDC_ISSUER:?set LOGSEQ_OIDC_ISSUER}
+      COGNITO_CLIENT_ID: ${LOGSEQ_OIDC_CLIENT_ID:?set LOGSEQ_OIDC_CLIENT_ID}
+      COGNITO_JWKS_URL: ${LOGSEQ_OIDC_JWKS_URL:?set LOGSEQ_OIDC_JWKS_URL}
+    volumes:
+      - sync-data:/var/lib/logseq-sync
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    restart: unless-stopped
+  publish:
+    image: localhost/logseq-publish:latest
+    ports:
+      - "8082:8787"
+    environment:
+      COGNITO_ISSUER: ${LOGSEQ_OIDC_ISSUER:?set LOGSEQ_OIDC_ISSUER}
+      COGNITO_CLIENT_ID: ${LOGSEQ_OIDC_CLIENT_ID:?set LOGSEQ_OIDC_CLIENT_ID}
+      COGNITO_JWKS_URL: ${LOGSEQ_OIDC_JWKS_URL:?set LOGSEQ_OIDC_JWKS_URL}
+      # The worker serves published pages and assets itself; the only route that
+      # hands out a presigned R2 URL is GET /pages/:graph/:page/transit, and
+      # local workerd has no R2 endpoint to sign for. Placeholders keep the
+      # signing code happy — same as the existing container deployment.
+      R2_ACCOUNT_ID: local
+      R2_BUCKET: logseq-publish-local
+      R2_ACCESS_KEY_ID: local
+      R2_SECRET_ACCESS_KEY: local
+    volumes:
+      - publish-data:/var/lib/logseq-publish
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    restart: unless-stopped
+volumes:
+  sync-data:
+  publish-data:
