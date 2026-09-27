@@ -10,6 +10,8 @@
       cfg = config.programs.logseq;
     in
     {
+      key = "logseq";
+
       options.programs.logseq = {
         enable = lib.mkEnableOption "Logseq, knowledge management platform";
 
