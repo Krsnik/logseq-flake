@@ -1,4 +1,4 @@
-{ inputs, self, ... }: {
+{ self, ... }: {
   flake.homeModules.logseq =
     {
       config,
@@ -10,10 +10,6 @@
       cfg = config.programs.logseq;
     in
     {
-      imports = [
-        inputs.home-manager.flakeModules.home-manager
-      ];
-
       options.programs.logseq = {
         enable = lib.mkEnableOption "Logseq, knowledge management platform";
 
