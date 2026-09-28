@@ -4,7 +4,7 @@
    return translate('amplify', key, ...args)
  }
  
-+// The device-flow sign-in in ui.tsx reads oauthDomain/userPoolClientId off this.
++// The device-flow sign-in in ui.tsx reads oidcIssuer/userPoolClientId off this.
 +export const authConfig: any = {}
 +
  export function init({ lang, authCognito }: any) {
@@ -23,20 +23,24 @@
  import * as Auth from 'aws-amplify/auth'
  import { Skeleton } from '@/components/ui/skeleton'
  import * as React from 'react'
-@@ -148,10 +148,40 @@
+@@ -148,10 +148,44 @@
    return { countDownNum, startCountDown, setCountDownNum }
  }
  
 +// Self-hosted sign-in (logseq-flake patch, oidc-device-flow.patch): the OAuth
-+// 2.0 Device Authorization Grant (RFC 8628) against https://<oauthDomain>,
-+// instead of Cognito's own API. The actual login (password, MFA, brokering,
-+// sign-up) happens on the IdP's own page in a real browser, so the same code
-+// serves web, desktop and mobile with no redirect handling. Paths follow the
-+// /oauth2/token convention the client's refresh already hardcodes
-+// (src/main/frontend/handler/user.cljs), so the IdP needs one more rewrite of
-+// the same kind: /oauth2/device -> its device authorization endpoint.
-+async function oauthPost(endpoint: string, params: Record<string, string>) {
-+  const res = await fetch(`https://${authConfig.oauthDomain}/oauth2/${endpoint}`, {
++// 2.0 Device Authorization Grant (RFC 8628) against the OIDC provider at
++// authConfig.oidcIssuer, instead of Cognito's own API. Its endpoints come from
++// the provider's discovery document, so any provider offering the grant works
++// with no proxy rewrites. The actual login (password, MFA, brokering,
++// sign-up) happens on the provider's own page in a real browser, so the same
++// code serves web, desktop and mobile with no redirect handling.
++async function discover() {
++  const res = await fetch(`${authConfig.oidcIssuer}/.well-known/openid-configuration`)
++  return res.json()
++}
++
++async function oauthPost(url: string, params: Record<string, string>) {
++  const res = await fetch(url, {
 +    method: 'POST',
 +    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 +    body: new URLSearchParams({ client_id: authConfig.userPoolClientId, ...params })
@@ -65,7 +69,7 @@
    const loadSession = async () => {
      try {
        const ret = await Auth.fetchAuthSession()
-@@ -210,77 +240,73 @@
+@@ -210,77 +244,77 @@
      )
    }
  
@@ -104,14 +108,18 @@
 +    setErrors(null)
 +    setLoading(true)
 +    try {
-+      const { body: grant } = await oauthPost('device', { scope: 'openid email profile' })
++      const { device_authorization_endpoint, token_endpoint } = await discover()
++      if (!device_authorization_endpoint) {
++        throw new Error(`${authConfig.oidcIssuer} does not offer the OAuth device flow.`)
++      }
++      const { body: grant } = await oauthPost(device_authorization_endpoint, { scope: 'openid email profile' })
 +      if (!grant.device_code) throw new Error(grant.error_description || grant.error || JSON.stringify(grant))
 +      setDevice(grant)
 +      let interval = (grant.interval || 5) * 1000
 +      const deadline = Date.now() + grant.expires_in * 1000
 +      while (!cancelled.current && Date.now() < deadline) {
 +        await new Promise(resolve => setTimeout(resolve, interval))
-+        const { ok, body } = await oauthPost('token', {
++        const { ok, body } = await oauthPost(token_endpoint, {
 +          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
 +          device_code: grant.device_code
 +        })
@@ -205,3 +213,95 @@
    )
  }
  
+--- a/src/main/frontend/components/user/login.cljs
++++ b/src/main/frontend/components/user/login.cljs
+@@ -32,7 +32,8 @@
+     :userPoolId config/USER-POOL-ID,
+     :userPoolClientId config/COGNITO-CLIENT-ID,
+     :identityPoolId config/IDENTITY-POOL-ID,
+-    :oauthDomain config/OAUTH-DOMAIN}))
++    :oauthDomain config/OAUTH-DOMAIN
++    :oidcIssuer config/OIDC-ISSUER}))
+ 
+ (defn authenticator
+   [opts & children]
+--- a/src/main/frontend/config.cljs
++++ b/src/main/frontend/config.cljs
+@@ -24,6 +24,10 @@
+ 
+ (def COGNITO-CLIENT-ID cognito-config/COGNITO-CLIENT-ID)
+ (def OAUTH-DOMAIN cognito-config/OAUTH-DOMAIN)
++;; logseq-flake: the OIDC provider that sign-in and token refresh use instead
++;; of Cognito; its endpoints come from its discovery document. Filled in at
++;; build time from clientConfig.oidcIssuer.
++(def OIDC-ISSUER "@oidcIssuer@")
+ 
+ (def API-DOMAIN "api.logseq.com")
+ (def COGNITO-IDP "https://cognito-idp.us-east-1.amazonaws.com/")
+--- a/src/main/frontend/handler/user.cljs
++++ b/src/main/frontend/handler/user.cljs
+@@ -167,6 +167,19 @@
+      (set-token-to-localstorage! "" "" ""))
+    (persist-auth-file!)))
+ 
++(defn- <oidc-token-url
++  "logseq-flake: the OIDC provider's token endpoint, from its discovery
++  document. Cached in :auth/oauth-token-url, which is also where the db worker
++  looks for it (sync-app-state passes that key through), so it is fetched once."
++  []
++  (go
++    (or (:auth/oauth-token-url @state/state)
++        (let [resp (<! (http/get (str config/OIDC-ISSUER "/.well-known/openid-configuration")
++                                 {:with-credentials? false}))]
++          (when-let [url (get-in resp [:body :token_endpoint])]
++            (state/set-state! :auth/oauth-token-url url)
++            url)))))
++
+ (defn- set-tokens!
+   ([id-token access-token]
+    (state/set-auth-id-token id-token)
+@@ -181,16 +194,23 @@
+    (state/set-auth-refresh-token refresh-token)
+    (set-token-to-localstorage! id-token access-token refresh-token)
+    (persist-auth-file!)
++   ;; Sign-in and startup both land here: warm the endpoint cache now, so the
++   ;; db worker has it before its first refresh rather than after ours.
++   (<oidc-token-url)
+    (some->> (parse-jwt (state/get-auth-id-token))
+             (reset! flows/*current-login-user))))
+ 
+ (defn- <refresh-tokens
+   "return refreshed id-token, access-token"
+   [refresh-token]
+-  (http/post (str "https://" config/OAUTH-DOMAIN "/oauth2/token")
+-             {:form-params {:grant_type "refresh_token"
+-                            :client_id config/COGNITO-CLIENT-ID
+-                            :refresh_token refresh-token}}))
++  (go
++    (if-let [token-url (<! (<oidc-token-url))]
++      (<! (http/post token-url
++                     {:form-params {:grant_type "refresh_token"
++                                    :client_id config/COGNITO-CLIENT-ID
++                                    :refresh_token refresh-token}}))
++      ;; Discovery failed: to the caller, the same as the provider being down.
++      {:status 0})))
+ 
+ (defn <refresh-id-token&access-token
+   "Refresh id-token and access-token"
+--- a/src/main/frontend/worker/sync/auth.cljs
++++ b/src/main/frontend/worker/sync/auth.cljs
+@@ -38,9 +38,11 @@
+ 
+ (defn oauth-token-url
+   [state]
+-  (or (:auth/oauth-token-url state)
+-      (when-let [domain (not-empty (:auth/oauth-domain state))]
+-        (str "https://" domain "/oauth2/token"))))
++  ;; logseq-flake: only the endpoint the main thread discovered from the OIDC
++  ;; provider (frontend.handler.user/<oidc-token-url). Never guess Cognito's
++  ;; /oauth2/token on :auth/oauth-domain: refreshing before discovery would
++  ;; send the refresh token to Amazon.
++  (:auth/oauth-token-url state))
+ 
+ (defn <refresh-id&access-token
+   []

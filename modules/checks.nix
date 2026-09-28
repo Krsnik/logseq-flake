@@ -36,7 +36,6 @@ in
       # syncPort above (test-node collision avoidance, not a recommendation).
       syncWorkerPort = 8788;
       publishPort = 8787;
-      oauthProxyPort = 9090;
 
       # One node definition for all three server checks: ../examples/keycloak.nix
       # describes the whole self-hosted stack (realm + sync + sync-worker +
@@ -52,7 +51,6 @@ in
               syncPort
               syncWorkerPort
               publishPort
-              oauthProxyPort
               ;
           })
         ];
@@ -136,13 +134,21 @@ in
                 assert claim in id_claims, f"id_token is missing {claim}"
             assert id_claims["cognito:username"] == "test", id_claims["cognito:username"]
 
-            # And the refresh grant the client actually sends, through the rewrite
-            # that exists because the client hardcodes the /oauth2/token path.
+            # And the refresh grant the client actually sends, at the token
+            # endpoint it reads from the realm's discovery document
+            # (oidc-device-flow.patch) — the same document sign-in reads the
+            # device endpoint from, so assert that one is advertised too.
+            discovery = jsonlib.loads(
+                machine.succeed(
+                    "curl -sSf http://localhost:${toString keycloakPort}/realms/logseq/.well-known/openid-configuration"
+                )
+            )
+            assert "device_authorization_endpoint" in discovery, sorted(discovery)
             refreshed = jsonlib.loads(
                 machine.succeed(
                     "curl -sSf -d grant_type=refresh_token -d client_id=logseq"
                     f" -d refresh_token={body['refresh_token']}"
-                    " http://127.0.0.1:${toString oauthProxyPort}/oauth2/token"
+                    f" {discovery['token_endpoint']}"
                 )
             )
             for key in ["id_token", "access_token"]:
@@ -152,23 +158,23 @@ in
         };
 
         # The client half of the self-hosted-IdP claim, end to end, in a real
-        # browser: a web app built with oidcDeviceFlow signs in through its own
-        # UI against the realm `sync` uses, and the sync server then receives
-        # a request carrying the token it got. Everything the logged-in flow
-        # needs is on that path (the device-flow patch, the /oauth2/*
-        # rewrites, the user_info stub in _webapp-nginx.nix), so if any piece
-        # is missing, no authenticated /graphs request ever arrives.
+        # browser: a web app built with oidcIssuer signs in through its own UI
+        # against the realm `sync` uses, refreshes its token, and the sync
+        # server then receives a request carrying the token it got. Everything
+        # the logged-in flow needs is on that path (the device-flow patch and
+        # its endpoint discovery, the user_info stub in _webapp-nginx.nix), so
+        # if any piece is missing, no authenticated /graphs request arrives.
         login =
           let
             hosts = [
-              "idp.test"
               "app.test"
               "sync.test"
             ];
-            # TEST-ONLY: one self-signed cert for all three, and a browser that
+            # TEST-ONLY: one self-signed cert for both, and a browser that
             # ignores it. TLS at all because the client hardcodes https:// for
-            # oauthDomain and apiDomain, and an https page cannot open a ws://
-            # sync socket.
+            # apiDomain, and an https page cannot open a ws:// sync socket. The
+            # realm itself stays plain http://localhost, which browsers treat as
+            # trustworthy, so fetching it from the https page is not mixed content.
             cert = pkgs.runCommand "logseq-test-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
               mkdir $out
               openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=logseq.test \
@@ -206,38 +212,25 @@ in
               virtualisation.memorySize = lib.mkForce 4096;
               virtualisation.cores = 4;
               networking.hosts."127.0.0.1" = hosts;
+              services.nginx.enable = true;
 
               services.logseq-webapp = {
                 enable = true;
                 port = webappPort;
                 package = packages.logseq-webapp.override {
                   clientConfig = {
+                    # The realm's issuer, the same value the servers get: every
+                    # endpoint the client needs is in its discovery document.
+                    oidcIssuer = "http://localhost:${toString keycloakPort}/realms/logseq";
                     cognitoClientId = "logseq";
-                    oauthDomain = "idp.test";
                     apiDomain = "app.test";
                     syncHttpBase = "https://sync.test";
                     syncWsUrl = "wss://sync.test/sync/%s";
-                    oidcDeviceFlow = true;
                   };
                 };
               };
 
               services.nginx.virtualHosts = {
-                # keycloak.nix's /oauth2/* rewrites, on the https host the client
-                # was built to call. 0.0.0.0 like the other two vhosts, not
-                # 127.0.0.1: nginx picks the listen socket before the
-                # server_name, so a more specific address would swallow every
-                # request to 127.0.0.1:443, whatever its Host.
-                oauth-shim = tls // {
-                  serverName = "idp.test";
-                  listen = [
-                    {
-                      addr = "0.0.0.0";
-                      port = 443;
-                      ssl = true;
-                    }
-                  ];
-                };
                 "app.test" = tls // {
                   locations."/".proxyPass = "http://127.0.0.1:${toString webappPort}";
                 };
@@ -268,6 +261,25 @@ in
               machine.wait_for_open_port(${toString syncPort})
               machine.wait_for_unit("logseq-webapp.service")
               machine.wait_for_unit("nginx.service")
+
+              # Record the realm's refresh events, so the refresh can be asserted
+              # from the server side: a device-code poll and a refresh hit the
+              # same token endpoint. Named explicitly because Keycloak doesn't
+              # store REFRESH_TOKEN events by default, even with events on.
+              # Admin tokens live a minute, so fetch one per call.
+              def keycloak_admin(args):
+                  token = machine.succeed(
+                      "curl -sSf -d grant_type=password -d client_id=admin-cli"
+                      " -d username=admin -d password=admin"
+                      " http://localhost:${toString keycloakPort}/realms/master/protocol/openid-connect/token"
+                      " | jq -er .access_token"
+                  ).strip()
+                  return machine.succeed(f"curl -sSf -H 'Authorization: Bearer {token}' {args}")
+
+              keycloak_admin(
+                  "-X PUT -H 'Content-Type: application/json' -d '{\"eventsEnabled\":true,\"enabledEventTypes\":[\"REFRESH_TOKEN\"]}'"
+                  " http://localhost:${toString keycloakPort}/admin/realms/logseq/events/config"
+              )
 
               # The user_info stub answers the preflight the desktop app sends...
               machine.succeed(
@@ -304,7 +316,7 @@ in
                       " document.getElementById('oidc-sign-in') !== null)"
                   )
                   # Starting the device flow gets a code from the realm, across
-                  # origins, through keycloak.nix's /oauth2/device rewrite.
+                  # origins, at the endpoint its discovery document names.
                   js("document.getElementById('oidc-sign-in').click()")
                   wait_for_js("document.getElementById('oidc-user-code') !== null", timeout=60)
                   user_code = js("document.getElementById('oidc-user-code').textContent")
@@ -352,6 +364,16 @@ in
                       """grep -qE '"GET /graphs [^"]*" 200' /var/log/nginx/access.log""",
                       timeout=180,
                   )
+                  # The ensure-token step before that request refreshed (Keycloak's
+                  # 5-minute tokens are always within upstream's 1-hour "almost
+                  # expired"), at the token endpoint discovery named.
+                  refreshes = json.loads(
+                      keycloak_admin(
+                          "'http://localhost:${toString keycloakPort}/admin/realms/logseq/events"
+                          "?type=REFRESH_TOKEN&client=logseq'"
+                      )
+                  )
+                  assert refreshes, "the app never refreshed its token"
               except Exception:
                   print(machine.execute("journalctl -u chromium --no-pager | grep CONSOLE | tail -n 60")[1])
                   print(machine.execute("tail -n 50 /var/log/nginx/access.log")[1])

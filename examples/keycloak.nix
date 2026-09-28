@@ -31,9 +31,6 @@
   syncPort ? 3000,
   syncWorkerPort ? 8787,
   publishPort ? 8787,
-  # Where the /oauth2/token rewrite the *clients* need is served; see the nginx
-  # block below for why it exists at all.
-  oauthProxyPort ? 9090,
   # Must match the realm in ./logseq-realm.json, and must equal the token's
   # `iss` claim character for character: verify-jwt compares them with =.
   issuer ? "http://localhost:${toString keycloakPort}/realms/logseq",
@@ -100,38 +97,12 @@
     realmFiles = [ ./logseq-realm.json ];
   };
 
-  # The clients refresh tokens by POSTing to https://<oauthDomain>/oauth2/token
-  # (src/main/frontend/handler/user.cljs): `clientConfig.oauthDomain` sets the
-  # host, but that *path* is a hardcoded literal, and Keycloak serves the token
-  # endpoint at /realms/<realm>/protocol/openid-connect/token instead. So a
-  # self-hosted client needs this one rewrite in front of the realm, or sign-in
-  # appears to work and then dies at the first refresh. The grant itself is
-  # ordinary OAuth2 (grant_type=refresh_token + client_id, no secret), which
-  # Keycloak accepts unchanged — verified by the `sync` check.
-  #
-  # /oauth2/device is the same idea for sign-in: clients built with
-  # clientConfig.oidcDeviceFlow start the OAuth device flow there, then poll
-  # /oauth2/token (../modules/packages/oidc-device-flow.patch). The realm
-  # client needs the device grant switched on for it (logseq-realm.json's
-  # `attributes`) — verified by the `login` check.
-  #
-  # TEST-ONLY: plain HTTP. Point `oauthDomain` at a TLS front end in anything
-  # real, since the client always prefixes https://.
-  services.nginx = {
-    enable = true;
-    virtualHosts."oauth-shim" = {
-      listen = [
-        {
-          addr = "127.0.0.1";
-          port = oauthProxyPort;
-        }
-      ];
-      locations."/oauth2/token".proxyPass =
-        "http://127.0.0.1:${toString keycloakPort}/realms/logseq/protocol/openid-connect/token";
-      locations."/oauth2/device".proxyPass =
-        "http://127.0.0.1:${toString keycloakPort}/realms/logseq/protocol/openid-connect/auth/device";
-    };
-  };
+  # Clients need nothing in front of the realm: built with
+  # `clientConfig.oidcIssuer` set to this same `issuer`, they read the device
+  # authorization and token endpoints from its discovery document
+  # (../modules/packages/oidc-device-flow.patch). The realm client only needs
+  # the device grant switched on (logseq-realm.json's `attributes`) —
+  # verified by the `login` check.
 
   # Both servers take all of their identity config from the environment —
   # nothing is baked into either package — so switching identity providers is

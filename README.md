@@ -45,13 +45,13 @@ inputs.logseq.packages.${system}.logseq-webapp.override {
 | `clientConfig` key           | Sets                                                                         |
 | ---------------------------- | ---------------------------------------------------------------------------- |
 | `apiDomain`                  | Host answering `/file-sync/user_info`; point it at your web app              |
-| `oauthDomain`                | Identity-provider host used for login                                        |
+| `oauthDomain`                | Cognito hosted-login host (upstream's login only)                            |
 | `cognitoClientId`            | OAuth client id                                                              |
-| `cognitoIdp`                 | Identity-provider issuer URL                                                 |
+| `cognitoIdp`                 | Cognito API endpoint (upstream's login only)                                 |
 | `userPoolId`                 | Cognito-shaped user-pool id                                                  |
 | `syncHttpBase` / `syncWsUrl` | Default sync server URL (`%s` is the graph id) — a *default* only, see below |
 | `publishApiBase`             | Default publish server URL — also a default only                             |
-| `oidcDeviceFlow`             | `true` replaces the Cognito login form with the OAuth device flow (see below) |
+| `oidcIssuer`                 | Your OIDC provider; replaces Cognito login and refresh (see below)           |
 
 `logseq-sync`, `logseq-sync-worker` and `logseq-publish` take no `clientConfig` —
 see [Setting the identity provider](#setting-the-identity-provider) for how they're configured instead.
@@ -75,7 +75,8 @@ which reads its `clientConfig` from `examples/docker-build/client-config.json` a
 
 ```sh
 podman build --network host -o type=local,dest=out \
-  --build-arg API_DOMAIN=api.example.org \
+  --build-arg API_DOMAIN=notes.example.org \
+  --build-arg OIDC_ISSUER=https://id.example.org/realms/logseq \
   -f examples/docker-build/Dockerfile .
 
 ./examples/docker-build/load-image.sh out/result
@@ -105,7 +106,7 @@ One module per server/webapp target, `inputs.logseq.nixosModules.logseq-{webapp,
 | `port`                                                          | all                        | Listen port                                                                                                                    |
 | `openFirewall`                                                  | all                        | Open `port` in the firewall                                                                                                    |
 | `user` / `group`                                                | all                        | Fixed user instead of the default `DynamicUser` (needed if your host doesn't keep a `DynamicUser`'s UID stable across reboots) |
-| `oidcIssuer`                                                    | sync, sync-worker, publish | Identity-provider issuer URL (required)                                                                                        |
+| `oidcIssuer`                 | Your OIDC provider; replaces Cognito login and refresh (see below)           |
 | `oidcClientId`                                                  | sync, sync-worker, publish | Expected client id (required)                                                                                                  |
 | `oidcJwksUrl`                                                   | sync, sync-worker, publish | Signing-key endpoint (required)                                                                                                |
 | `r2AccountId`, `r2Bucket`, `r2AccessKeyId`, `r2SecretAccessKey` | sync-worker, publish       | R2 binding — placeholders are fine, both run on wrangler's local runtime with no real R2 to reach                              |
@@ -148,28 +149,26 @@ One module per server/webapp target, `inputs.logseq.nixosModules.logseq-{webapp,
 
 (The `COGNITO_*` names are upstream's; they carry no Amazon-specific meaning and work with any OIDC provider.)
 
-**Clients sign in with the OAuth device flow** when built with `oidcDeviceFlow = true`.
+**Clients sign in with the OAuth device flow** when built with an `oidcIssuer`.
 The login dialog shows a short code and a link to your identity provider,
 you log in there with whatever it offers (password, MFA, or a brokered GitLab/Forgejo login),
 and the app picks up the tokens. The same code runs on web, desktop and Android:
 
 ```nix
 clientConfig = {
-  oidcDeviceFlow = true;
-  oauthDomain = "id.example.org";   # serves /oauth2/device and /oauth2/token
-  cognitoClientId = "logseq";       # your IdP's public client
-  apiDomain = "notes.example.org";  # where logseq-webapp is served
+  oidcIssuer = "https://id.example.org/realms/logseq"; # same value as the servers' oidcIssuer
+  cognitoClientId = "logseq";                          # your provider's public client
+  apiDomain = "notes.example.org";                     # where logseq-webapp is served
   syncHttpBase = "https://sync.example.org";
   syncWsUrl = "wss://sync.example.org/sync/%s";
 };
 ```
 
-Your identity provider needs:
+The client reads every endpoint it needs from the provider's standard discovery document
+(`<oidcIssuer>/.well-known/openid-configuration`), so nothing has to be rewritten or proxied. Your provider needs:
 
 - a public client with the OAuth 2.0 device authorization grant enabled;
-- `https://<oauthDomain>/oauth2/device` and `/oauth2/token` routed to its device-authorization and token endpoints,
-  since the client hardcodes those Cognito-style paths (`examples/keycloak.nix` shows the two nginx locations),
-  with CORS allowed for your app's origins;
+- CORS allowed for your app's origins: the web app's own, `lsp://logseq.com` for desktop;
 - a scalar `aud` equal to the client id on the access token, and a `cognito:username` claim on the id token
   (`examples/logseq-realm.json` has both mappers).
 

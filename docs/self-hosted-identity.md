@@ -8,33 +8,58 @@ to `../logseq`, which is a newer nightly with a rewritten login component.
 | Piece | State | Evidence |
 | - | - | - |
 | Sync + publish accept any OIDC provider | done, proven | `checks.sync`, `checks.publish` |
-| Token contract the clients need | done, proven | `checks.sync`: claims on the id token, refresh through the `/oauth2/token` rewrite |
+| Token contract the clients need | done, proven | `checks.sync`: claims on the id token, discovery advertises the device endpoint, refresh at the discovered token endpoint |
 | Endpoint overriding | done, mostly upstream's own | `localStorage` `sync-server-url` / `publish-server-url`; `clientConfig` supplies defaults |
 | `user_info` on the critical path | done, proven load-bearing | stub in `modules/packages/_webapp-nginx.nix`; negative case below |
 | Sign-in against a non-Cognito IdP | done for web, proven | `checks.login`; `modules/packages/oidc-device-flow.patch` |
-| Same, desktop and Android | built, not runtime-verified | same compiled `ui.js`; see "Not verified" |
+| Token refresh against it (main thread) | done for web, proven | `checks.login`: Keycloak records a `REFRESH_TOKEN` event |
+| Same, desktop and Android | built, not runtime-verified | same compiled code; see "Not verified" |
 
-## How sign-in works
+## How it works
 
-`clientConfig.oidcDeviceFlow = true` makes `applyClientConfig` apply
-`oidc-device-flow.patch` to `packages/ui/src/amplify/{core.ts,ui.tsx}`. That is
-the one place all Cognito coupling sits: `window.LSAuth`, whose only consumer is
-`src/main/frontend/components/user/login.cljs`. `LoginForm` becomes an OAuth 2.0
-Device Authorization Grant (RFC 8628):
+Set `clientConfig.oidcIssuer` to the provider's issuer URL: the same value the
+servers' `oidcIssuer` takes, e.g. `https://auth.example.org/realms/logseq`.
+`applyClientConfig` then applies `oidc-device-flow.patch`, with its one
+`@oidcIssuer@` placeholder (in `frontend/config.cljs`) filled in by nixpkgs'
+`replaceVars`. Every endpoint comes from the provider's standard discovery
+document, `<issuer>/.well-known/openid-configuration`, so nothing has to be
+rewritten or proxied in front of it.
 
-1. POST `https://<oauthDomain>/oauth2/device` (`client_id`, `scope=openid email profile`).
-2. Show `user_code` and a link to `verification_uri_complete`, which the user
+**Sign-in.** All Cognito coupling in the login UI sits behind `window.LSAuth`
+(`packages/ui/src/amplify/`), whose only consumer is
+`src/main/frontend/components/user/login.cljs`; that now passes `oidcIssuer`
+through. `LoginForm` becomes an OAuth 2.0 Device Authorization Grant (RFC 8628):
+
+1. Read `device_authorization_endpoint` and `token_endpoint` from discovery.
+2. POST the device endpoint (`client_id`, `scope=openid email profile`).
+3. Show `user_code` and a link to `verification_uri_complete`, which the user
    opens in any browser. Password, MFA, brokering and sign-up all happen there.
-3. Poll `https://<oauthDomain>/oauth2/token` with the device-code grant,
-   honouring `interval` and `slow_down`, and stop if the dialog closes.
-4. Hand the tokens to `userSessionRender` in the shape `login-callback`
+4. Poll the token endpoint with the device-code grant, honouring `interval`
+   and `slow_down`, and stop if the dialog closes.
+5. Hand the tokens to `userSessionRender` in the shape `login-callback`
    (`src/main/frontend/handler/user.cljs`) destructures. Unlike upstream's, the
    session carries the refresh token itself: `logged-in?` keys off it, and there
    is no Cognito localStorage entry for `auto-fill-refresh-token-from-cognito!`
    to scrape it from.
 
-Nothing downstream changes: `set-tokens!`, localStorage, the refresh loop and
-the servers were already provider-neutral.
+**Refresh.** Upstream refreshes in two places, both with Cognito's layout
+hardcoded (`https://<oauthDomain>/oauth2/token`):
+
+- The main thread (`<refresh-tokens` in `handler/user.cljs`). The patch has it
+  read `token_endpoint` from discovery once and cache it in
+  `:auth/oauth-token-url`. It warms that cache whenever a full token set
+  arrives (sign-in, or a restore at startup), not just on the first refresh.
+- The db worker (`oauth-token-url` in `worker/sync/auth.cljs`), for its
+  websocket token. It already preferred `:auth/oauth-token-url`, which the main
+  thread's `sync-app-state` passes through. The patch removes its fallback of
+  guessing `https://<oauth-domain>/oauth2/token`: a worker refresh before
+  discovery would otherwise send the refresh token to Amazon's Cognito.
+
+Nothing else downstream changes: `set-tokens!`, localStorage and the servers
+were already provider-neutral.
+
+With the key unset (`null`), the patch isn't applied and every package's
+drvPath is byte-identical to a build without this work.
 
 ### Why this mechanism (chosen 2026-09-28)
 
@@ -55,13 +80,16 @@ the servers were already provider-neutral.
   link; the web needs a callback page.
 - **Device flow** runs the login on the IdP's own pages in a real browser, so
   one code path covers all three. Its only UX cost is confirming a code.
+- **Discovery, not path conventions.** The first version of the patch took a
+  host and mirrored Cognito's layout (`/oauth2/device` next to upstream's
+  `/oauth2/token`), which forced every deployment to proxy-rewrite both paths
+  onto the provider's real ones. RFC 8628 fixes no path; the discovery
+  document is where a provider publishes them.
 
-The IdP side, as `examples/keycloak.nix` + `examples/logseq-realm.json` do it:
-
-- device grant enabled on a public client (`attributes`);
-- `/oauth2/device` and `/oauth2/token` on the `oauthDomain` host, rewritten to
-  the realm's endpoints (Keycloak's own CORS covers both, via `webOrigins`);
-- the audience mapper and `cognito:username` claim (see `AGENTS.md`).
+The provider side, as `examples/keycloak.nix` + `examples/logseq-realm.json` do
+it: the device grant enabled on a public client (`attributes`), CORS for the
+app origins (`webOrigins`), and the audience mapper and `cognito:username` claim
+(see `AGENTS.md`). Keycloak serves discovery with CORS itself, for any origin.
 
 And `apiDomain` points at wherever the web app is served, because its nginx
 answers `POST /file-sync/user_info` with `{"UserGroups":["rtc_2025_07_10"]}`.
@@ -91,10 +119,15 @@ Run both ways on 2026-09-28, same VM as `checks.login`:
   verification link opens: Electron's `setWindowOpenHandler`
   (`src/electron/electron/window.cljs`) sends https to the system browser, and
   Capacitor opens external navigation there too. Read from source, not run.
+- **The db worker's refresh.** It only runs when the worker's own websocket
+  token has expired, which `checks.login` never waits for. The change there is
+  a one-line narrowing (drop the Cognito guess), read against the source.
 - **`logseq login` (the CLI).** It is auth-code + PKCE against
-  `/oauth2/authorize` with its own `CLI-COGNITO-CLIENT-ID`
-  (`src/main/logseq/cli/auth.cljs`), which `applyClientConfig` doesn't patch.
-  Untouched.
+  `https://<OAUTH-DOMAIN>/oauth2/authorize` with its own
+  `CLI-COGNITO-CLIENT-ID` (`src/main/logseq/cli/auth.cljs`); not patched.
+  Since the desktop app writes its tokens to the `~/logseq/auth.json` the CLI
+  reads, don't use the CLI with a self-hosted-IdP build: it would try to
+  refresh them at Cognito.
 - **Sign-out** clears the app's tokens but not the IdP's session cookie.
 
 ## Traps
@@ -111,9 +144,16 @@ Run both ways on 2026-09-28, same VM as `checks.login`:
   `?user_code=` it goes straight to login, then a consent page, then "Device
   Login Successful". Scripted form posts have to resolve the action and carry
   every named input, not just the hidden ones.
-- **`oauthDomain` sets only a host**; the paths are hardcoded (`/oauth2/token`
-  for refresh, `/oauth2/device` for the patch). Without the token rewrite,
-  sign-in works and the first refresh fails.
+- **Discovery is fetched without credentials** (`:with-credentials? false` in
+  the patch). A provider may answer it with `Access-Control-Allow-Origin: *`,
+  which browsers refuse for a credentialed request. Keycloak instead reflects
+  any origin for it (it's public metadata; probed live), so `webOrigins` only
+  gates the device and token endpoints.
+- **The issuer's scheme is the provider's, not the client's.** The patch no
+  longer prefixes `https://`, so a plain-http issuer works from an http page
+  (e.g. a local test on `http://localhost`). From a secure page (any https
+  deployment, and desktop's `lsp://`, which is registered secure) it would be
+  blocked as mixed content, unless it's `http://localhost` itself.
 - **Don't add a runtime config path for sync/publish endpoints.** Upstream
   already has one (localStorage + Settings).
 - **`nginx`'s `mime.types` has no `.mjs`.** It served the PDF viewer's module

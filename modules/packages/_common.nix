@@ -6,6 +6,7 @@
   fetchzip,
   clojure,
   writeShellScriptBin,
+  replaceVars,
   git,
   cacert,
   pnpm_10,
@@ -183,11 +184,11 @@ let
     publishApiBase = "https://logseq.io";
     syncWsUrl = "wss://api.logseq.io/sync/%s";
     syncHttpBase = "https://api.logseq.io";
-    # Not a literal but a switch: replace the Cognito-only login form with
-    # the OAuth device flow (./oidc-device-flow.patch) against
-    # https://<oauthDomain>. Off by default because Cognito has no device
-    # endpoint, so it would break every upstream-pool build.
-    oidcDeviceFlow = false;
+    # Not an upstream literal: set to an OIDC issuer URL (the same value the
+    # servers' oidcIssuer takes) to swap the Cognito-only login form and
+    # token refresh for the OAuth device flow against that provider
+    # (./oidc-device-flow.patch). null keeps upstream's Cognito login.
+    oidcIssuer = null;
   };
 
   clientConfigPatches = {
@@ -228,10 +229,15 @@ let
       '') patches
     );
 
+  # The patch goes first, against pristine sources: its context lines include
+  # literals the substitutions below rewrite. -F0 so drift fails the build
+  # instead of applying fuzzily.
   applyClientConfig =
     cfg:
-    applyConfigPatches cfg clientConfigPatches
-    + lib.optionalString cfg.oidcDeviceFlow "patch -p1 < ${./oidc-device-flow.patch}\n";
+    lib.optionalString (cfg.oidcIssuer != null) "patch -p1 -F0 < ${
+      replaceVars ./oidc-device-flow.patch { inherit (cfg) oidcIssuer; }
+    }\n"
+    + applyConfigPatches cfg clientConfigPatches;
   applyCliConfig = cfg: applyConfigPatches cfg cliClientConfigPatches;
 
   setupSources = { packageJsons }: ''

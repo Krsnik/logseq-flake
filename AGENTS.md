@@ -24,8 +24,8 @@ by a check in `./logseq-flake/modules/checks.nix` (`nix flake check`):
 
 |Check|What it proves|
 |-|-|
-|`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`cognito:username`, and the refresh grant works through the hardcoded-`/oauth2/token` rewrite|
-|`login`|VM, same realm: a web app built with `oidcDeviceFlow` signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It starts the device flow cross-origin via the `/oauth2/device` rewrite, completes Keycloak's device/login/consent pages, and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
+|`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`cognito:username`, the realm's discovery document advertises a device endpoint, and the refresh grant works at the `token_endpoint` it names (both what the patched client relies on)|
+|`login`|VM, same realm: a web app built with `oidcIssuer` signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It reads the realm's discovery document and starts the device flow cross-origin, completes Keycloak's device/login/consent pages, **refreshes at the discovered token endpoint** (asserted from Keycloak's own `REFRESH_TOKEN` events), and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
 |`webapp`|VM: nginx serves the bundle, the app entry point loads|
 |`desktop`|Launcher executable, bundled CLI runs, `StartupWMClass` matches the wrapper's `--class`, both the cljs and OCaml halves carry the configured endpoints|
 |`publish`|VM: the same node as `sync`. The worker runs outside Cloudflare at all (its Durable Object + R2 bindings come from wrangler's local runtime), serves its rendered home page and inlined static assets, `DELETE /pages/:g/:p` is 401 without a token and **404 with one the local realm minted** — past `verify-jwt`, having fetched the realm's JWKS from inside workerd|
@@ -506,28 +506,31 @@ before adapting it to a different provider:
   `aud: ["account"]` and a separate `azp`, not the scalar `aud` `verify-jwt`
   wants — `logseq-realm.json` has a mapper that emits the client id as a
   plain string `aud` instead.
-- **The client refresh path is hardcoded to `/oauth2/token`** (only the host
-  is `clientConfig.oauthDomain`), which is Cognito's path, not Keycloak's
-  (`/realms/<realm>/protocol/openid-connect/token`) — `keycloak.nix` has a
-  one-line rewrite in front for this. Without it, sign-in looks fine and the
-  first refresh fails.
+- **Upstream hardcodes Cognito's endpoint layout**
+  (`https://<oauthDomain>/oauth2/token`, in the main thread and again in the
+  db worker), which no other provider serves. With `clientConfig.oidcIssuer`
+  set, the patch replaces both with the provider's discovery document, so
+  nothing is rewritten in front of the realm. An earlier version of this work
+  mirrored Cognito's paths and needed nginx rewrites for them; don't
+  reintroduce that.
 
 **Clients: sign-in is the OAuth device flow (RFC 8628), opt-in with
-`clientConfig.oidcDeviceFlow = true`.** Upstream's login form is Amplify
-speaking Cognito's own API, so repointing `oauthDomain` never made sign-in
-work. `modules/packages/oidc-device-flow.patch`, applied by
+`clientConfig.oidcIssuer`**, the same issuer URL the servers get. Upstream's
+login form is Amplify speaking Cognito's own API, so repointing `oauthDomain`
+never made sign-in work. `modules/packages/oidc-device-flow.patch`, applied by
 `applyClientConfig` (so web, desktop, Android and the images all get it the
-same way), replaces that form. It starts a device grant at
-`https://<oauthDomain>/oauth2/device`, polls `/oauth2/token`, and hands
-`login-callback` the session shape it already expects. Everything downstream is
-upstream's own. It's off by default because Cognito has no device endpoint:
-unset, every package's drvPath is byte-identical to before the patch existed.
-The IdP needs the device grant on a public client plus an `/oauth2/device`
-rewrite next to the `/oauth2/token` one. **`user_info` is proven
-load-bearing**, and the web app's nginx now serves the stub for it (point
-`apiDomain` at the web app). `checks.login` proves all of it for the web app.
-**Desktop and Android run the same compiled code but are not
-runtime-verified.** Why this mechanism and not a "Cognito-compatible" IdP
+same way) with its one `@oidcIssuer@` placeholder filled by nixpkgs'
+`replaceVars`, replaces that form and both refresh paths. It reads the device
+and token endpoints from the provider's discovery document, runs the device
+grant, and hands `login-callback` the session shape it already expects.
+Everything else downstream is upstream's own. It's off by default
+(`oidcIssuer = null`) because Cognito has no device endpoint: unset, every
+package's drvPath is byte-identical to before the patch existed. The provider
+needs the device grant on a public client, and CORS for the app origins.
+**`user_info` is proven load-bearing**, and the web app's nginx now serves the
+stub for it (point `apiDomain` at the web app). `checks.login` proves all of
+it for the web app. **Desktop and Android run the same compiled code but are
+not runtime-verified.** Why this mechanism and not a "Cognito-compatible" IdP
 (none is usable) or redirect+PKCE, the negative `user_info` experiment, and
 the traps: `docs/self-hosted-identity.md`.
 
@@ -539,8 +542,8 @@ they need no rebuild and are per-user: `sync-server-url` (overrides
 graphs) and `publish-server-url` (the publish API base). So `clientConfig`'s
 `syncHttpBase`/`syncWsUrl`/`publishApiBase` are compiled-in *defaults* for a
 preconfigured build, not the only lever. The identity keys
-(`cognitoClientId`, `oauthDomain`, `apiDomain`, `cognitoIdp`, `userPoolId`)
-have no runtime equivalent.
+(`oidcIssuer`, `cognitoClientId`, `oauthDomain`, `apiDomain`, `cognitoIdp`,
+`userPoolId`) have no runtime equivalent.
 
 **Identity brokering example**: Keycloak sits between the clients and
 whatever actually authenticates the user — it doesn't have to be a
@@ -548,7 +551,7 @@ Keycloak-local password. Identity brokering lets Keycloak delegate login to
 another OIDC provider (e.g. a self-hosted GitLab or Forgejo/Gitea, both of
 which expose `/.well-known/openid-configuration` for their own OAuth
 applications) and mint its own token afterwards, so the contract above
-(audience mapper, `cognito:username`, refresh rewrite) is unchanged — only
+(audience mapper, `cognito:username`) is unchanged — only
 who the user types their password into moves. Register an OAuth application
 on the GitLab/Forgejo side (redirect URI
 `<keycloak-issuer>/broker/<alias>/endpoint`), then add to the realm export:
@@ -589,11 +592,12 @@ for the detail and traps). Remaining, roughly in order of value:
    Electron binary under the same CDP driver `checks.login` uses. Android
    can't be exercised in a NixOS VM.
 1. **`logseq login` (the CLI)** still does auth-code + PKCE against
-   `https://<oauthDomain>/oauth2/authorize` with its own
-   `CLI-COGNITO-CLIENT-ID`, which `applyClientConfig` doesn't patch. An
-   `/oauth2/authorize` rewrite plus that one literal would plausibly be
-   enough, since the realm already allows `http://localhost:*` redirects.
-   Not attempted.
+   `https://<oauthDomain>/oauth2/authorize` and `/oauth2/token` with its own
+   `CLI-COGNITO-CLIENT-ID`, none of which `applyClientConfig` patches. It
+   would want the same discovery treatment (the realm already allows
+   `http://localhost:*` redirects). Not attempted. Until then, don't run the
+   CLI against a self-hosted-IdP build's `~/logseq/auth.json`: it would try
+   to refresh those tokens at Cognito.
 1. **Sign-out ends the app session, not the IdP's.** Amplify's `signOut` has
    no tokens to revoke, so signing in again skips the IdP password prompt
    while its session cookie lives. Probably fine; revisit if it isn't.
@@ -663,8 +667,8 @@ derivation: all four `drvPath`s were byte-identical before and after.
   `mkPnpmDeps` (helper for any standalone `--ignore-workspace` pnpm
   subproject), `pnpmStoreHelper`, `setupSources` (the identical opening
   every target's `preConfigure` had), `defaultClientConfig`/
-  `applyClientConfig` (cljs sources, plus `./oidc-device-flow.patch` when
-  `oidcDeviceFlow` is set) and `applyCliConfig` (the OCaml CLI's
+  `applyClientConfig` (cljs sources, plus `./oidc-device-flow.patch` through
+  `replaceVars` when `oidcIssuer` is set) and `applyCliConfig` (the OCaml CLI's
   own copies of the same literals, `cli/lib/{auth_state,cli_config}.ml`) —
   both are thin wrappers around one generic `applyConfigPatches` engine plus
   a per-file-list data table, so a literal's upstream value is written once
