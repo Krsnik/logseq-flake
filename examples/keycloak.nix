@@ -97,10 +97,10 @@
     realmFiles = [ ./logseq-realm.json ];
   };
 
-  # Clients need nothing in front of the realm: built with
-  # `clientConfig.oidcIssuer` set to this same `issuer`, they read the device
-  # authorization and token endpoints from its discovery document
-  # (../modules/packages/oidc-device-flow.patch). The realm client only needs
+  # Clients need nothing in front of the realm: given this same `issuer` as
+  # their `oidcIssuer` (LOGSEQ_OIDC_ISSUER for the web app), they read the
+  # device authorization and token endpoints from its discovery document
+  # (../modules/packages/self-hosting.patch). The realm client only needs
   # the device grant switched on (logseq-realm.json's `attributes`) —
   # verified by the `login` check.
 

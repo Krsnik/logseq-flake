@@ -25,27 +25,26 @@ by a check in `./logseq-flake/modules/checks.nix` (`nix flake check`):
 |Check|What it proves|
 |-|-|
 |`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`cognito:username`, the realm's discovery document advertises a device endpoint, and the refresh grant works at the `token_endpoint` it names (both what the patched client relies on)|
-|`login`|VM, same realm: a web app built with `oidcIssuer` signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It reads the realm's discovery document and starts the device flow cross-origin, completes Keycloak's device/login/consent pages, **refreshes at the discovered token endpoint** (asserted from Keycloak's own `REFRESH_TOKEN` events), and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
+|`login`|VM, same realm: the **stock** web app package, given `oidcIssuer` and endpoints only at runtime (`services.logseq-webapp.clientConfig`), signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It reads the realm's discovery document and starts the device flow cross-origin, completes Keycloak's device/login/consent pages, **refreshes at the discovered token endpoint** (asserted from Keycloak's own `REFRESH_TOKEN` events), and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
 |`webapp`|VM: nginx serves the bundle, the app entry point loads|
-|`desktop`|Launcher executable, bundled CLI runs, `StartupWMClass` matches the wrapper's `--class`, both the cljs and OCaml halves carry the configured endpoints|
+|`desktop`|Launcher executable, bundled CLI runs, `StartupWMClass` matches the wrapper's `--class`, the app ships its baked `js/logseq-config.js` (next to upstream's fallbacks in `main.js`) and the OCaml CLI its substituted literals|
 |`publish`|VM: the same node as `sync`. The worker runs outside Cloudflare at all (its Durable Object + R2 bindings come from wrangler's local runtime), serves its rendered home page and inlined static assets, `DELETE /pages/:g/:p` is 401 without a token and **404 with one the local realm minted** — past `verify-jwt`, having fetched the realm's JWKS from inside workerd|
-|`android`|The APK is a real APK and its bundled JS carries the configured endpoints|
-|`containers`|VM running podman: the web app image serves unprivileged under `cap_drop=ALL`, `js/sqlite3.wasm` comes back as `application/wasm`, and `/login` falls back to `index.html`|
+|`android`|The APK is a real APK and its web assets carry the baked `js/logseq-config.js` and upstream's fallbacks|
+|`containers`|VM running podman: the generic web app image serves unprivileged under `cap_drop=ALL`, `js/sqlite3.wasm` comes back as `application/wasm`, `/login` falls back to `index.html`, and `LOGSEQ_*` variables given to the container come back in its `js/logseq-config.js`|
 |`sync-worker`|VM, same realm as `sync`/`publish`: `/health` public, `/graphs` 401 without a token, `/openapi.json` proves the semantic-REST build step actually produced something, a realm-minted token gets past `verify-jwt` (then hits the documented D1/`cognito:username` upstream bug — asserted explicitly, not silently)|
 |`webapp-service`|VM: `services.logseq-webapp`'s own dedicated nginx process serves the bundle, `application/wasm` for `sqlite3.wasm`, `text/javascript` for `pdf.mjs`, `/login` falls back to `index.html` — the module wiring, not just the package (that's `webapp`, above)|
 |`desktop-module`|Eval-only (no port to knock on, no VM): a throwaway `nixosSystem` with `programs.logseq.enable = true` actually lands `packages.logseq` in `environment.systemPackages` — `nix flake check`'s own module type-check proves the module evaluates, this proves `enable` does something|
 
 |Target|Package|Status|`clientConfig` override|
 |-|-|-|-|
-|Desktop (Electron)|`packages.logseq`|done|yes, free (`.override { clientConfig = {...}; }`)|
-|Web app (static PWA)|`packages.logseq-webapp`|done|yes, free — **verified end-to-end** by grepping the compiled bundle for an overridden `apiDomain`|
+|Desktop (Electron)|`packages.logseq`|done|baked in (`.override { clientConfig = {...}; }`): no server to hand it config at runtime|
+|Web app (static PWA)|`packages.logseq-webapp`|done|**at runtime**: `LOGSEQ_*` env (image, `nix run`) or the module's `clientConfig`, over optional baked defaults — proven by `checks.login` on the stock package|
 |Sync server (Node adapter)|`packages.logseq-sync`|done|n/a — config is already runtime env vars, not build-time patching|
 |Sync worker (Cloudflare Worker build)|`packages.logseq-sync-worker`|done|n/a — same runtime-env-var story as sync/publish|
-|Android app|`packages.logseq-android`|done|yes, free (`.override { clientConfig = {...}; }`) — same as desktop/webapp, since Milestone 2's `gradle.fetchDeps` split|
+|Android app|`packages.logseq-android`|done|baked in, like desktop; free since Milestone 2's `gradle.fetchDeps` split|
 |Publish service|`packages.logseq-publish`|done|n/a — like sync, config is runtime env vars, not build-time patching|
-|Container images|`packages.logseq-{webapp,sync,publish}-image`|done|webapp's image takes `clientConfig` straight through to the package; the servers' take none, same as the packages|
-|Docker-native webapp config|`packages.logseq-webapp-docker-image`|done|reads `examples/docker-build/client-config.json` instead of a Nix argument, so a `docker build --build-arg` never has to touch `.nix`|
-|NixOS service modules|`flake.nixosModules.logseq-{webapp,sync,sync-worker,publish}`|done|`package` override, same as the underlying package|
+|Container images|`packages.logseq-{webapp,sync,publish}-image`|done|all generic, configured from the environment; the web app's image optionally bakes defaults|
+|NixOS service modules|`flake.nixosModules.logseq-{webapp,sync,sync-worker,publish}`|done|`services.logseq-webapp.clientConfig`, at runtime|
 |Desktop NixOS module|`flake.nixosModules.logseq`|done|`package` override, same as the underlying package|
 |Desktop home-manager module|`flake.homeManagerModules.logseq`|done|`package` override, same as the underlying package|
 
@@ -57,9 +56,10 @@ services (sync-worker, publish) default to **8787**. These wrappers live in
 the two servers with a `*_DATA_DIR` default of `/var/lib/...` (unwritable
 by a non-root `nix run`), the wrapper points it at a scratch `mktemp -d`
 instead (only when the caller hasn't already set that env var themselves);
-the web app has no binary at all, so its wrapper spins up nginx against
-the same recipe (`modules/packages/_webapp-nginx.nix`) the container image
-uses (see "Container images" below).
+the web app has no binary at all, so its wrapper runs the same runner
+(`modules/packages/_webapp-nginx.nix`) the container image and the NixOS
+module use: `LOGSEQ_*` variables in, the client's config written, nginx
+started (see "Container images" below).
 
 ### Desktop client
 
@@ -101,15 +101,23 @@ Static PWA bundle, no Electron/keytar/CLI. Built via upstream's own `pnpm releas
 tree is servable as-is from any static-file root — no special server
 config needed (verified with `python -m http.server` + `curl`).
 
-`clientConfig` override verified for real, not just evaluated: built with
-a custom `apiDomain`, then grepped the compiled `main.js` — the new value
-is in the URL-construction code, the old one is gone from that context.
-**One residual gap found and not yet fixed**: a separate hardcoded
-`"https://api.logseq.com/logseq/version"` literal (an update-check ping)
-survives every override; it's a different string than the ones
-`applyClientConfig` patches. Low priority (not an identity/sync/publish
-endpoint) but worth knowing before calling any target's endpoint
-overriding "complete."
+**Configured at runtime, so one build serves every deployment.**
+`./modules/packages/self-hosting.patch` makes `frontend/config.cljs` read every
+identity and endpoint value from `window.LOGSEQ_CONFIG`, which
+`js/logseq-config.js` sets before any bundle loads (upstream's literals stay as
+the fallbacks). The build bakes that file from `clientConfig` (default `{}`),
+and every server of the web app (image, `nix run`, NixOS module) goes through
+one runner that rewrites it at startup from `LOGSEQ_*` variables layered over
+the baked values (`_webapp-nginx.nix`). `checks.login` runs the stock package
+configured this way. This replaced build-time literal substitution for the app
+(the OCaml CLI still uses that), and with it the Docker `--build-arg` front
+door (`examples/docker-build/`, `logseq-webapp-docker-image`), which only
+existed because the config used to be compiled in.
+
+**One residual gap, not fixed**: a hardcoded
+`"https://api.logseq.com/logseq/version"` update-check ping isn't one of the
+configurable values. Low priority (not an identity/sync/publish endpoint) but
+worth knowing before calling endpoint overriding "complete."
 
 ### Sync server (`packages.logseq-sync`)
 
@@ -322,21 +330,20 @@ loaded into podman and probed by hand; the web app's image also has a
 `containers` check (VM + podman) because it is the only one with logic of its
 own.
 
-The web app's nginx recipe (mime type for `js/sqlite3.wasm`, SPA `try_files`
-fallback) lives in its own file, `modules/packages/_webapp-nginx.nix`, shared
-between this image and the `nix run` wrapper in `modules/apps/webapp.nix` —
-its paths are relative, resolved against whichever `-p <dir>` the caller
-launches nginx with (the image's own `/tmp`, or a `nix run`'s throwaway
-`mktemp -d`), so one recipe covers both instead of two copies drifting apart.
+The web app's runner (the nginx conf, with its wasm and `.mjs` types, the
+`user_info` stub and the runtime client config, plus the script that writes
+that config and starts nginx) lives in `modules/packages/_webapp-nginx.nix`,
+shared by this image, the `nix run` wrapper and `services.logseq-webapp`. It
+takes a writable directory and resolves every relative path against it (the
+image's own `/tmp`, a `nix run`'s `mktemp -d`, the service's state
+directory), so one recipe covers all three instead of copies drifting apart.
 
-The config split carries over intact and the images do **not** invent a second
-mechanism: the servers take compose `environment:` entries, and the web app's
-image is a `callPackage` function taking the same `clientConfig` the package
-does, passed straight through. Verified end to end rather than assumed — built
-`logseq-webapp-image.override { clientConfig.apiDomain = "…"; }`, unpacked the
-resulting layer and grepped the compiled `main.js`: the custom domain is in the
-URL-construction code, and the only surviving `api.logseq.com` is the known
-`/logseq/version` update-check literal `applyClientConfig` never covered.
+**All three images are generic**: everything deployment-specific comes from
+compose `environment:` entries, the servers' natively and the web app's through
+the runner (`LOGSEQ_*`, keys in `modules/packages/_client-config.nix`). So they
+can be built once and published. `checks.containers` gives the web app image
+`LOGSEQ_*` variables and asserts they come back in its `js/logseq-config.js`.
+The image still takes `clientConfig`, but only as baked defaults.
 
 Four things worth knowing, none of which were obvious up front:
 
@@ -394,7 +401,10 @@ consumer, the one deliberate exception to how every other service in this
 repo keeps nginx external: there's no backend to proxy to here,
 nginx-serving-static-files *is* the service, not domain/TLS routing (a real
 deployment still fronts it with an ordinary reverse-proxy vhost of its own,
-same as any other service here). `examples/keycloak.nix` is now a consumer
+same as any other service here). Its `clientConfig` option (one `nullOr str`
+per key in `_client-config.nix`, so a typo fails evaluation) becomes the
+runner's `LOGSEQ_*` environment: changing the identity provider restarts
+nginx, it doesn't rebuild the bundle. `examples/keycloak.nix` is now a consumer
 of the sync/sync-worker/publish modules (an optional `logseq-sync-worker`
 parameter lets `checks.sync-worker` reuse the same realm setup without
 duplicating it) instead of hand-rolling `systemd.services`.
@@ -441,51 +451,6 @@ understood failure explicitly (not a silent 401, not a fake 200) so a
 change either way — upstream fixing it, or a regression making it worse —
 fails loudly rather than rotting unnoticed.
 
-## Docker-native identity-provider config
-
-Done. `packages.logseq-webapp-docker-image` (`modules/packages/images.nix`)
-is `logseq-webapp-image.override { clientConfig = ...; }` with the override
-value read from a checked-in `examples/docker-build/client-config.json`
-(default `{}`, reproducing the plain image exactly) instead of taken as a
-Nix argument — so a container-only consumer never has to write a `.nix`
-file or learn `.override` syntax at all. Kept as its own package, not a
-default baked into `logseq-webapp-image` itself, so `checks.containers`
-(which builds `logseq-webapp-image` directly) stays fully isolated from
-this path.
-
-`examples/docker-build/Dockerfile` is the actual `--build-arg` front door:
-one `ARG` per `defaultClientConfig` key (9 total, same defaults as
-`_common.nix`'s), a `RUN` step that shells `jq -n --arg ... '$ARGS.named'`
-(not string interpolation, which breaks on the `:`/`/`/`%` characters real
-endpoint URLs contain) to turn those into `client-config.json`, then `nix
-build 'path:/src#logseq-webapp-docker-image'` — `path:`, never a bare
-`.#...`/`git+file://` ref, for the usual reason (this repo's git objects are
-sha256; Nix's git fetcher only understands sha1). The `nix build` output is
-already a docker-loadable tar.gz (`dockerTools.buildLayeredImage`); making
-the Dockerfile's own final stage directly runnable would mean ingesting
-that externally-built OCI tar as one of the final stage's own layers,
-which no Dockerfile instruction does — so the last stage is `FROM scratch`
-holding just the one file, exported with `--output type=local` instead of
-the more roundabout "build an image, then `docker create`+`docker cp` out
-of it".
-
-Verified for real, not just written: built
-`packages.logseq-webapp-docker-image` twice directly with `nix build` (the
-same mechanism the Dockerfile's `RUN` invokes) — once with the checked-in
-`{}` placeholder, confirming it reproduces `logseq-webapp-image`'s own
-output path byte-for-byte, and once with a hand-written
-`client-config.json` carrying a distinctive `apiDomain`, unpacked the
-resulting layer and grepped the compiled `main.js`: the override landed
-in the URL-construction code, and the one surviving `api.logseq.com` is the
-same already-documented `/logseq/version` update-check literal, not a new
-gap. The Dockerfile itself (the `podman build -o type=local,...` /
-`docker buildx build --output ...` invocation end to end) was written and
-reasoned through but not executed in this environment — it needs real
-container-build tooling with network access that this session's sandbox
-doesn't have; the part that was actually in question (does the override
-reach the bundle through a JSON file instead of a Nix argument) is what got
-verified.
-
 ## Identity provider contract
 
 Moved here from README.md, which now only states the short version for
@@ -508,25 +473,24 @@ before adapting it to a different provider:
   plain string `aud` instead.
 - **Upstream hardcodes Cognito's endpoint layout**
   (`https://<oauthDomain>/oauth2/token`, in the main thread and again in the
-  db worker), which no other provider serves. With `clientConfig.oidcIssuer`
-  set, the patch replaces both with the provider's discovery document, so
+  db worker), which no other provider serves. With an `oidcIssuer`
+  configured, the patch replaces both with the provider's discovery document, so
   nothing is rewritten in front of the realm. An earlier version of this work
   mirrored Cognito's paths and needed nginx rewrites for them; don't
   reintroduce that.
 
-**Clients: sign-in is the OAuth device flow (RFC 8628), opt-in with
-`clientConfig.oidcIssuer`**, the same issuer URL the servers get. Upstream's
+**Clients: sign-in is the OAuth device flow (RFC 8628), switched on at
+runtime by an `oidcIssuer`**, the same issuer URL the servers get. Upstream's
 login form is Amplify speaking Cognito's own API, so repointing `oauthDomain`
-never made sign-in work. `modules/packages/oidc-device-flow.patch`, applied by
-`applyClientConfig` (so web, desktop, Android and the images all get it the
-same way) with its one `@oidcIssuer@` placeholder filled by nixpkgs'
-`replaceVars`, replaces that form and both refresh paths. It reads the device
-and token endpoints from the provider's discovery document, runs the device
-grant, and hands `login-callback` the session shape it already expects.
-Everything else downstream is upstream's own. It's off by default
-(`oidcIssuer = null`) because Cognito has no device endpoint: unset, every
-package's drvPath is byte-identical to before the patch existed. The provider
-needs the device grant on a public client, and CORS for the app origins.
+never made sign-in work. `modules/packages/self-hosting.patch` (applied to
+every client build) makes the client read its config at runtime (see "Web
+app" above) and, when that config has an `oidcIssuer`, replaces the login
+form and both refresh paths: it reads the device and token endpoints from the
+provider's discovery document, runs the device grant, and hands
+`login-callback` the session shape it already expects. Without one, upstream's
+Cognito form and refresh run unchanged, so the same generic bundle serves
+both. Everything else downstream is upstream's own. The provider needs the
+device grant on a public client, and CORS for the app origins.
 **`user_info` is proven load-bearing**, and the web app's nginx now serves the
 stub for it (point `apiDomain` at the web app). `checks.login` proves all of
 it for the web app. **Desktop and Android run the same compiled code but are
@@ -543,7 +507,8 @@ graphs) and `publish-server-url` (the publish API base). So `clientConfig`'s
 `syncHttpBase`/`syncWsUrl`/`publishApiBase` are compiled-in *defaults* for a
 preconfigured build, not the only lever. The identity keys
 (`oidcIssuer`, `cognitoClientId`, `oauthDomain`, `apiDomain`, `cognitoIdp`,
-`userPoolId`) have no runtime equivalent.
+`userPoolId`) have no per-user equivalent; they're per deployment (`LOGSEQ_*`
+for the web app, baked for desktop and Android).
 
 **Identity brokering example**: Keycloak sits between the clients and
 whatever actually authenticates the user — it doesn't have to be a
@@ -608,7 +573,7 @@ for the detail and traps). Remaining, roughly in order of value:
 with the device flow: Amplify never holds tokens, so it never calls AWS. That
 makes them "remove", not "add". The `https://api.logseq.com/logseq/version`
 update-check ping is the one live upstream call left. It's cosmetic, and cheap
-to add to `applyClientConfig` if anyone cares.
+to route through the runtime config if anyone cares.
 
 ## Boundaries (intentionally not touched)
 
@@ -666,13 +631,12 @@ derivation: all four `drvPath`s were byte-identical before and after.
   `mldocSrc` (the `mldoc` splice, also shared by both sync targets),
   `mkPnpmDeps` (helper for any standalone `--ignore-workspace` pnpm
   subproject), `pnpmStoreHelper`, `setupSources` (the identical opening
-  every target's `preConfigure` had), `defaultClientConfig`/
-  `applyClientConfig` (cljs sources, plus `./oidc-device-flow.patch` through
-  `replaceVars` when `oidcIssuer` is set) and `applyCliConfig` (the OCaml CLI's
-  own copies of the same literals, `cli/lib/{auth_state,cli_config}.ml`) —
-  both are thin wrappers around one generic `applyConfigPatches` engine plus
-  a per-file-list data table, so a literal's upstream value is written once
-  (in `defaultClientConfig`) no matter how many files/targets embed it.
+  every target's `preConfigure` had), `applyClientConfig` (applies
+  `./self-hosting.patch` and bakes `clientConfig` into
+  `resources/{,mobile/}js/logseq-config.js`, rejecting keys that aren't in
+  `_client-config.nix`) and `applyCliConfig` (the OCaml CLI's own literals,
+  `cli/lib/{auth_state,cli_config}.ml`, substituted from
+  `defaultClientConfig`, which holds upstream's values).
   Takes `inputs` as a parameter (threaded in by every `callPackage
   ./_common.nix { inherit inputs; }` call site) since plain `inputs` is not
   a valid `perSystem` module arg in flake-parts — every package file's
@@ -698,10 +662,18 @@ derivation: all four `drvPath`s were byte-identical before and after.
   is structural.
 - `modules/packages/android.nix` — the Android app; see its own section
   above for why it's structurally different from the rest (one mega-FOD).
-- `modules/packages/_webapp-nginx.nix` — the nginx recipe for serving the
-  static webapp bundle, shared by `images.nix`'s container image and
-  `modules/apps/webapp.nix`'s `nix run` wrapper; not itself a flake-parts
+- `modules/packages/_webapp-nginx.nix` — the web app's runner: an nginx conf
+  plus the script that writes the client's runtime config from `LOGSEQ_*`
+  variables (over the package's baked `passthru.clientConfig`) and execs
+  nginx. Shared by `images.nix`'s container image, `modules/apps/webapp.nix`'s
+  `nix run` wrapper and `services.logseq-webapp`; not itself a flake-parts
   module (the `_` prefix), just a `callPackage`-able function.
+- `modules/packages/_client-config.nix` — every `clientConfig` key and its
+  `LOGSEQ_*` variable: the one list the build, the runner and the NixOS
+  module check against.
+- `modules/packages/self-hosting.patch` — the client-side patch, applied to
+  every client build: runtime config, and device-flow sign-in and refresh
+  against an OIDC provider when one is configured.
 - `stdenv` vs `stdenvNoCC`, and `finalAttrs`: every `mkDerivation` in
   `modules/packages/` uses the `stdenv.mkDerivation (finalAttrs: {...})`
   form (self-referencing `finalAttrs.pname` etc. to kill duplicated
@@ -748,13 +720,9 @@ derivation: all four `drvPath`s were byte-identical before and after.
   applies to a desktop app, so reusing that helper would mean carrying
   options that do nothing.
 - `modules/packages/images.nix` — one OCI image per deployable target (web
-  app, sync, publish; no `sync-worker` image yet). The web app's is a
-  `callPackage` function taking `clientConfig` through to the package; the
-  servers' take none, because the packages don't either.
-  `logseq-webapp-docker-image` is a fourth package here, wrapping
-  `logseq-webapp-image` with `clientConfig` read from
-  `examples/docker-build/client-config.json` — the Docker-native front door,
-  see that section above.
+  app, sync, publish; no `sync-worker` image yet), all generic and configured
+  from the environment. The web app's runs the runner; its `clientConfig`
+  argument only bakes defaults.
 - `modules/checks.nix` — one check per target, reading `config.packages`
   from the same `perSystem`; anything that answers on a port gets a NixOS VM
   test (`pkgs.testers.runNixOSTest`) — the two servers share one node
@@ -766,12 +734,9 @@ derivation: all four `drvPath`s were byte-identical before and after.
   verbatim (the `sync` and `publish` checks share one node definition), so the
   example cannot rot. Read its comments before adapting the realm.
 - `examples/docker-compose.yml` — the three images as a stack, podman- and
-  docker-compatible. Its three `LOGSEQ_OIDC_*` variables have no defaults on
-  purpose, so it fails loudly rather than quietly falling back to upstream's
-  Cognito pool.
-- `examples/docker-build/` — the Docker-native `clientConfig` front door
-  (`Dockerfile`, checked-in `client-config.json` placeholder,
-  `load-image.sh`), see "Docker-native identity-provider config" above.
+  docker-compatible. Its `LOGSEQ_*` variables have no defaults on purpose, so
+  it fails loudly rather than quietly falling back to upstream's Cognito pool
+  and api.logseq.io.
 - `README.md` — the outward-facing version of this file.
 - `docs/self-hosted-identity.md` — how clients sign in against a self-hosted
   IdP (the device-flow patch, the `user_info` stub), what's proven and what

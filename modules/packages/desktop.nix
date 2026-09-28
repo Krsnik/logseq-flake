@@ -23,8 +23,8 @@ let
       libsecret,
       inputs,
 
-      # Identity provider and sync/publish endpoints; see _common.nix's
-      # defaultClientConfig for the keys. Any subset may be overridden.
+      # Identity provider and sync/publish endpoints; keys in
+      # _client-config.nix. Any subset may be overridden.
       clientConfig ? { },
     }:
     let
@@ -45,6 +45,7 @@ let
         defaultClientConfig
         ;
 
+      # The bundled OCaml CLI still substitutes literals, so it needs every key.
       cfg = defaultClientConfig // clientConfig;
       electron = electron_42;
 
@@ -282,7 +283,7 @@ let
             "resources/package.json"
           ];
         }}
-        ${applyClientConfig cfg}
+        ${applyClientConfig clientConfig}
       '';
 
       preBuild = ''

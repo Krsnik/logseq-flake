@@ -11,17 +11,20 @@ to `../logseq`, which is a newer nightly with a rewritten login component.
 | Token contract the clients need | done, proven | `checks.sync`: claims on the id token, discovery advertises the device endpoint, refresh at the discovered token endpoint |
 | Endpoint overriding | done, mostly upstream's own | `localStorage` `sync-server-url` / `publish-server-url`; `clientConfig` supplies defaults |
 | `user_info` on the critical path | done, proven load-bearing | stub in `modules/packages/_webapp-nginx.nix`; negative case below |
-| Sign-in against a non-Cognito IdP | done for web, proven | `checks.login`; `modules/packages/oidc-device-flow.patch` |
+| Sign-in against a non-Cognito IdP | done for web, proven | `checks.login` (stock package, runtime config); `modules/packages/self-hosting.patch` |
 | Token refresh against it (main thread) | done for web, proven | `checks.login`: Keycloak records a `REFRESH_TOKEN` event |
 | Same, desktop and Android | built, not runtime-verified | same compiled code; see "Not verified" |
 
 ## How it works
 
-Set `clientConfig.oidcIssuer` to the provider's issuer URL: the same value the
-servers' `oidcIssuer` takes, e.g. `https://auth.example.org/realms/logseq`.
-`applyClientConfig` then applies `oidc-device-flow.patch`, with its one
-`@oidcIssuer@` placeholder (in `frontend/config.cljs`) filled in by nixpkgs'
-`replaceVars`. Every endpoint comes from the provider's standard discovery
+Give the client an `oidcIssuer`: the provider's issuer URL, the same value the
+servers' `oidcIssuer` takes, e.g. `https://auth.example.org/realms/logseq`. For
+the web app that's runtime config (`LOGSEQ_OIDC_ISSUER`, or
+`services.logseq-webapp.clientConfig`); desktop and Android bake it with a
+`clientConfig` override. `self-hosting.patch`, applied to every client build,
+makes `frontend/config.cljs` read it (and every other identity and endpoint
+value) from `window.LOGSEQ_CONFIG`, set by `js/logseq-config.js` before any
+bundle loads. Every endpoint comes from the provider's standard discovery
 document, `<issuer>/.well-known/openid-configuration`, so nothing has to be
 rewritten or proxied in front of it.
 
@@ -46,7 +49,8 @@ through. `LoginForm` becomes an OAuth 2.0 Device Authorization Grant (RFC 8628):
 hardcoded (`https://<oauthDomain>/oauth2/token`):
 
 - The main thread (`<refresh-tokens` in `handler/user.cljs`). The patch has it
-  read `token_endpoint` from discovery once and cache it in
+  resolve the endpoint once (`<token-url`: the provider's `token_endpoint` from
+  discovery, or Cognito's URL when no issuer is configured) and cache it in
   `:auth/oauth-token-url`. It warms that cache whenever a full token set
   arrives (sign-in, or a restore at startup), not just on the first refresh.
 - The db worker (`oauth-token-url` in `worker/sync/auth.cljs`), for its
@@ -58,8 +62,9 @@ hardcoded (`https://<oauthDomain>/oauth2/token`):
 Nothing else downstream changes: `set-tokens!`, localStorage and the servers
 were already provider-neutral.
 
-With the key unset (`null`), the patch isn't applied and every package's
-drvPath is byte-identical to a build without this work.
+Without an `oidcIssuer`, the patched client runs upstream's Cognito login and
+refresh unchanged (the endpoint cache then just holds Cognito's URL), so one
+generic build serves both.
 
 ### Why this mechanism (chosen 2026-09-28)
 
@@ -85,6 +90,11 @@ drvPath is byte-identical to a build without this work.
   `/oauth2/token`), which forced every deployment to proxy-rewrite both paths
   onto the provider's real ones. RFC 8628 fixes no path; the discovery
   document is where a provider publishes them.
+- **Runtime config, not compiled-in literals.** The values used to be
+  substituted into the sources at build time, so trying another provider meant
+  an 18-minute rebuild, and a container user had to rebuild the image with Nix.
+  Now one generic bundle (and image) takes them from `LOGSEQ_*` at startup.
+  Desktop and Android still bake theirs, having no server to ask.
 
 The provider side, as `examples/keycloak.nix` + `examples/logseq-realm.json` do
 it: the device grant enabled on a public client (`attributes`), CORS for the

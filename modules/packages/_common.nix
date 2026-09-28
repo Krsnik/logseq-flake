@@ -6,7 +6,7 @@
   fetchzip,
   clojure,
   writeShellScriptBin,
-  replaceVars,
+  writeText,
   git,
   cacert,
   pnpm_10,
@@ -18,6 +18,8 @@ let
   rev = version;
 
   pnpm = pnpm_10;
+
+  clientConfigKeys = import ./_client-config.nix;
 
   # The pinned Logseq source, as a flake input (flake.nix) rather than a
   # fetchFromGitHub call here — see flake.nix's comment on why.
@@ -172,9 +174,10 @@ let
     hash = "sha256-KOR8ayGXLCbYvmiRucHTleUvia6GXVa9f921AQwd8Ug=";
   };
 
-  # Upstream hardcodes its identity provider and sync/publish endpoints in the sources.
-  # These are the upstream values; override any subset with `<target>.override { clientConfig = { ... }; }`
-  # to point the client at a self-hosted IdP (e.g. Keycloak) or sync server.
+  # Upstream's values for everything `clientConfig` can override. The app
+  # reads its overrides at runtime (applyClientConfig, below); only the OCaml
+  # CLI still needs these, as search strings, and the checks grep bundles for
+  # them.
   defaultClientConfig = {
     cognitoClientId = "69cs1lgme7p8kbgld8n5kseii6";
     oauthDomain = "logseq-prod.auth.us-east-1.amazoncognito.com";
@@ -184,28 +187,9 @@ let
     publishApiBase = "https://logseq.io";
     syncWsUrl = "wss://api.logseq.io/sync/%s";
     syncHttpBase = "https://api.logseq.io";
-    # Not an upstream literal: set to an OIDC issuer URL (the same value the
-    # servers' oidcIssuer takes) to swap the Cognito-only login form and
-    # token refresh for the OAuth device flow against that provider
-    # (./oidc-device-flow.patch). null keeps upstream's Cognito login.
-    oidcIssuer = null;
   };
 
-  clientConfigPatches = {
-    "deps/common/src/logseq/common/cognito_config.cljs" = [
-      "cognitoClientId"
-      "oauthDomain"
-    ];
-    "src/main/frontend/config.cljs" = [
-      "apiDomain"
-      "cognitoIdp"
-      "userPoolId"
-      "publishApiBase"
-      "syncWsUrl"
-      "syncHttpBase"
-    ];
-  };
-
+  # The OCaml CLI keeps its own copies of some of those literals.
   cliClientConfigPatches = {
     "cli/lib/auth_state.ml" = [
       "oauthDomain"
@@ -218,27 +202,36 @@ let
     ];
   };
 
-  applyConfigPatches =
-    cfg: patches:
+  applyCliConfig =
+    cfg:
     lib.concatStrings (
       lib.mapAttrsToList (file: keys: ''
         substituteInPlace ${file} \
           ${lib.concatMapStringsSep " \\\n  " (
             key: "--replace-fail '\"${defaultClientConfig.${key}}\"' '\"${cfg.${key}}\"'"
           ) keys}
-      '') patches
+      '') cliClientConfigPatches
     );
 
-  # The patch goes first, against pristine sources: its context lines include
-  # literals the substitutions below rewrite. -F0 so drift fails the build
-  # instead of applying fuzzily.
+  # The app: ./self-hosting.patch makes the client read its identity and
+  # endpoint values from js/logseq-config.js at runtime (upstream's where
+  # unset), and this bakes `clientConfig` (the overrides only) into that file
+  # for web, desktop and mobile alike. A web server may serve its own instead,
+  # from the environment (./_webapp-nginx.nix). -F0 so upstream drift fails
+  # the build instead of applying fuzzily.
   applyClientConfig =
-    cfg:
-    lib.optionalString (cfg.oidcIssuer != null) "patch -p1 -F0 < ${
-      replaceVars ./oidc-device-flow.patch { inherit (cfg) oidcIssuer; }
-    }\n"
-    + applyConfigPatches cfg clientConfigPatches;
-  applyCliConfig = cfg: applyConfigPatches cfg cliClientConfigPatches;
+    clientConfig:
+    let
+      unknown = lib.subtractLists (lib.attrNames clientConfigKeys) (lib.attrNames clientConfig);
+      configJs = writeText "logseq-config.js" "window.LOGSEQ_CONFIG = ${builtins.toJSON clientConfig};\n";
+    in
+    assert lib.assertMsg (unknown == [ ]) "unknown clientConfig keys: ${toString unknown}";
+    ''
+      patch -p1 -F0 < ${./self-hosting.patch}
+      for dir in resources/js resources/mobile/js; do
+        install -Dm644 ${configJs} $dir/logseq-config.js
+      done
+    '';
 
   setupSources = { packageJsons }: ''
     export HOME=$(mktemp -d)

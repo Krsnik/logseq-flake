@@ -23,17 +23,18 @@
  import * as Auth from 'aws-amplify/auth'
  import { Skeleton } from '@/components/ui/skeleton'
  import * as React from 'react'
-@@ -148,10 +148,44 @@
+@@ -148,10 +148,45 @@
    return { countDownNum, startCountDown, setCountDownNum }
  }
  
-+// Self-hosted sign-in (logseq-flake patch, oidc-device-flow.patch): the OAuth
-+// 2.0 Device Authorization Grant (RFC 8628) against the OIDC provider at
-+// authConfig.oidcIssuer, instead of Cognito's own API. Its endpoints come from
-+// the provider's discovery document, so any provider offering the grant works
-+// with no proxy rewrites. The actual login (password, MFA, brokering,
-+// sign-up) happens on the provider's own page in a real browser, so the same
-+// code serves web, desktop and mobile with no redirect handling.
++// Self-hosted sign-in (logseq-flake, self-hosting.patch): when
++// authConfig.oidcIssuer is configured, LoginForm runs the OAuth 2.0 Device
++// Authorization Grant (RFC 8628) against that OIDC provider instead of showing
++// upstream's Cognito form. Its endpoints come from the provider's discovery
++// document, so any provider offering the grant works with no proxy rewrites.
++// The actual login (password, MFA, brokering, sign-up) happens on the
++// provider's own page in a real browser, so the same code serves web, desktop
++// and mobile with no redirect handling.
 +async function discover() {
 +  const res = await fetch(`${authConfig.oidcIssuer}/.well-known/openid-configuration`)
 +  return res.json()
@@ -55,7 +56,7 @@
 +
  export function LoginForm() {
 -  const { setErrors, setCurrentTab, onSessionCallback, userSessionRender } = useAuthFormState()
-+  const { errors, setErrors, onSessionCallback, userSessionRender } = useAuthFormState()
++  const { errors, setErrors, setCurrentTab, onSessionCallback, userSessionRender } = useAuthFormState()
    const [loading, setLoading] = useState<boolean>(false)
    const [sessionUser, setSessionUser] = useState<any>(null)
 +  // A pending device grant, and whether the dialog has closed on it: stop
@@ -69,41 +70,12 @@
    const loadSession = async () => {
      try {
        const ret = await Auth.fetchAuthSession()
-@@ -210,77 +244,77 @@
+@@ -208,6 +243,81 @@
+         </Button>
+       </div>
      )
-   }
- 
--  return (
--    <FormGroup onSubmit={async (e) => {
--      setErrors(null)
--      e.preventDefault()
--
--      // get submit form input data
--      const formData = new FormData(e.target as HTMLFormElement)
--      const data = Object.fromEntries(formData.entries())
--
--      // sign in logic here
--      try {
--        setLoading(true)
--        const username = (data.email as string)?.trim()
--        const ret = await Auth.signIn({ username, password: data.password as string })
--        const nextStep = ret?.nextStep?.signInStep
--        if (!nextStep) throw new Error(JSON.stringify(ret))
--        switch (nextStep) {
--          case 'CONFIRM_SIGN_UP':
--          case 'CONFIRM_SIGN_IN_WITH_EMAIL_CODE':
--          case 'CONFIRM_SIGN_IN_WITH_TOTP_CODE':
--            setCurrentTab({ type: 'confirm-code', props: { user: { ...ret, username }, nextStep } })
--            return
--          case 'RESET_PASSWORD':
--            setCurrentTab({ type: 'reset-password', props: { user: { ...ret, username }, nextStep } })
--            return
--          case 'DONE':
--            // signed in
--            await loadSession()
--            return
--          default:
--            throw new Error(`${t('Unsupported sign-in step:')} ${nextStep}`)
++  }
++
 +  const signIn = async () => {
 +    setErrors(null)
 +    setLoading(true)
@@ -138,29 +110,10 @@
 +            }
 +          })
 +          return
-         }
--      } catch (e) {
--        setErrors({ password: { message: getAuthErrorMessage(e), title: t('Bad Response.') } })
--        console.error(e)
--      } finally {
--        setLoading(false)
++        }
 +        if (body.error === 'slow_down') interval += 5000
 +        else if (body.error !== 'authorization_pending') throw new Error(body.error_description || body.error)
-       }
--    }}>
--      <InputRow id="email" type="text" required={true} name="email" autoFocus={true}
--                autoComplete="username"
--                label={t('Email')}/>
--      <InputRow id="password" type="password" required={true} name="password"
--                autoComplete="current-password"
--                label={t('Password')}/>
--
--      <div className={'w-full'}>
--        <Button type="submit" disabled={loading} className={'w-full'}>
--          {loading && <Loader2Icon className="animate-spin mr-1" size={16}/>}
--          {t('Sign in')}
--        </Button>
--        <p className={'pt-4 text-center'}>
++      }
 +      if (!cancelled.current) throw new Error('Sign-in timed out, please try again.')
 +    } catch (e: any) {
 +      setErrors({ signIn: { message: e?.message ?? String(e), title: t('Bad Response.') } })
@@ -170,49 +123,55 @@
 +      setLoading(false)
 +    }
 +  }
- 
--          <span className={'text-sm'}>
--            <span className={'opacity-50'}>{t('Don\'t have an account?')} </span>
--            <a
--              onClick={() => setCurrentTab('signup')}
--              className={'underline opacity-60 hover:opacity-80'}
--            >{t('Sign up')}</a>
--            <br/>
--            <span className={'opacity-50'}>{t('or')} &nbsp;</span>
--          </span>
--
--          <a onClick={() => {
--            setCurrentTab('reset-password')
--          }} className={'text-sm opacity-60 hover:opacity-80 underline'}>
--            {t('Forgot your password?')}
--          </a>
-+  if (device) {
-+    return (
-+      <div className={'w-full flex flex-col items-center gap-4 text-center'}>
-+        <p>
-+          Open <a href={device.verification_uri_complete || device.verification_uri}
-+                  target={'_blank'} rel={'noreferrer'} className={'underline'}>
-+            {device.verification_uri}
-+          </a> to sign in, and check that it shows this code:
-         </p>
-+        <p id={'oidc-user-code'} className={'text-2xl font-mono tracking-widest'}>{device.user_code}</p>
-+        <Loader2Icon className={'animate-spin opacity-50'} size={16}/>
-       </div>
--    </FormGroup>
-+    )
-+  }
 +
-+  return (
-+    <div className={'w-full flex flex-col gap-4'}>
-+      {errors?.signIn && <ErrorTip error={errors.signIn} removeError={() => setErrors(null)}/>}
-+      <Button id={'oidc-sign-in'} disabled={loading} className={'w-full'} onClick={signIn}>
-+        {loading && <Loader2Icon className="animate-spin mr-1" size={16}/>}
-+        {t('Sign in')}
-+      </Button>
-+    </div>
-   )
- }
++  if (authConfig.oidcIssuer) {
++    if (device) {
++      return (
++        <div className={'w-full flex flex-col items-center gap-4 text-center'}>
++          <p>
++            Open <a href={device.verification_uri_complete || device.verification_uri}
++                    target={'_blank'} rel={'noreferrer'} className={'underline'}>
++              {device.verification_uri}
++            </a> to sign in, and check that it shows this code:
++          </p>
++          <p id={'oidc-user-code'} className={'text-2xl font-mono tracking-widest'}>{device.user_code}</p>
++          <Loader2Icon className={'animate-spin opacity-50'} size={16}/>
++        </div>
++      )
++    }
++
++    return (
++      <div className={'w-full flex flex-col gap-4'}>
++        {errors?.signIn && <ErrorTip error={errors.signIn} removeError={() => setErrors(null)}/>}
++        <Button id={'oidc-sign-in'} disabled={loading} className={'w-full'} onClick={signIn}>
++          {loading && <Loader2Icon className="animate-spin mr-1" size={16}/>}
++          {t('Sign in')}
++        </Button>
++      </div>
++    )
+   }
  
+   return (
+--- a/resources/index.html
++++ b/resources/index.html
+@@ -32,6 +32,7 @@
+ <div id="root"></div>
+ <script>window.__LSP__HOST__ = true</script>
+ <script>window.user = null</script>
++<!-- logseq-flake: endpoint and identity config, read by frontend/config.cljs --><script src="./js/logseq-config.js"></script>
+ <script src="./js/magic_portal.js"></script>
+ <script defer src="./js/highlight.min.js"></script>
+ <script defer src="./js/interact.min.js"></script>
+--- a/resources/mobile/index.html
++++ b/resources/mobile/index.html
+@@ -9,6 +9,7 @@
+ <body>
+ <div id="root"></div>
+ <script>var isCapacitorNew=true</script>
++<!-- logseq-flake: endpoint and identity config, read by frontend/config.cljs --><script src="./js/logseq-config.js"></script>
+ <script src="./js/magic_portal.js"></script>
+ <script defer src="./js/highlight.min.js"></script>
+ <script defer src="./js/interact.min.js"></script>
 --- a/src/main/frontend/components/user/login.cljs
 +++ b/src/main/frontend/components/user/login.cljs
 @@ -32,7 +32,8 @@
@@ -227,46 +186,87 @@
    [opts & children]
 --- a/src/main/frontend/config.cljs
 +++ b/src/main/frontend/config.cljs
-@@ -24,6 +24,10 @@
+@@ -22,15 +22,27 @@
+ ;; when it launches (when pro plan launches) it should be removed
+ (def ENABLE-SETTINGS-ACCOUNT-TAB false)
  
- (def COGNITO-CLIENT-ID cognito-config/COGNITO-CLIENT-ID)
- (def OAUTH-DOMAIN cognito-config/OAUTH-DOMAIN)
-+;; logseq-flake: the OIDC provider that sign-in and token refresh use instead
-+;; of Cognito; its endpoints come from its discovery document. Filled in at
-+;; build time from clientConfig.oidcIssuer.
-+(def OIDC-ISSUER "@oidcIssuer@")
+-(def COGNITO-CLIENT-ID cognito-config/COGNITO-CLIENT-ID)
+-(def OAUTH-DOMAIN cognito-config/OAUTH-DOMAIN)
++;; logseq-flake: every identity and endpoint value below can come from
++;; window.LOGSEQ_CONFIG, set by js/logseq-config.js before this bundle loads.
++;; The Nix build bakes that file; a web server may serve its own instead, so
++;; one bundle can be configured at deploy time. Unset keys keep upstream's
++;; value. String keys (aget) so advanced compilation can't rename them.
++(defn- runtime-config
++  [k default]
++  (or (not-empty (some-> (aget js/globalThis "LOGSEQ_CONFIG") (aget k))) default))
++
++(def COGNITO-CLIENT-ID (runtime-config "cognitoClientId" cognito-config/COGNITO-CLIENT-ID))
++(def OAUTH-DOMAIN (runtime-config "oauthDomain" cognito-config/OAUTH-DOMAIN))
++;; The OIDC provider sign-in and token refresh use instead of Cognito, when
++;; set; its endpoints come from its discovery document.
++(def OIDC-ISSUER (runtime-config "oidcIssuer" nil))
  
- (def API-DOMAIN "api.logseq.com")
- (def COGNITO-IDP "https://cognito-idp.us-east-1.amazonaws.com/")
+-(def API-DOMAIN "api.logseq.com")
+-(def COGNITO-IDP "https://cognito-idp.us-east-1.amazonaws.com/")
++(def API-DOMAIN (runtime-config "apiDomain" "api.logseq.com"))
++(def COGNITO-IDP (runtime-config "cognitoIdp" "https://cognito-idp.us-east-1.amazonaws.com/"))
+ (def REGION "us-east-1")
+-(def USER-POOL-ID "us-east-1_dtagLnju8")
++(def USER-POOL-ID (runtime-config "userPoolId" "us-east-1_dtagLnju8"))
+ (def IDENTITY-POOL-ID "us-east-1:d6d3b034-1631-402b-b838-b44513e93ee0")
+-(def default-publish-api-base "https://logseq.io")
++(def default-publish-api-base (runtime-config "publishApiBase" "https://logseq.io"))
+ 
+ ;; Enable for local development
+ ;; (def default-publish-api-base "http://localhost:8787")
+@@ -41,12 +53,12 @@
+ (defonce default-db-sync-ws-url
+   (if db-sync-local?
+     "ws://127.0.0.1:8787/sync/%s"
+-    "wss://api.logseq.io/sync/%s"))
++    (runtime-config "syncWsUrl" "wss://api.logseq.io/sync/%s")))
+ 
+ (defonce default-db-sync-http-base
+   (if db-sync-local?
+     "http://127.0.0.1:8787"
+-    "https://api.logseq.io"))
++    (runtime-config "syncHttpBase" "https://api.logseq.io")))
+ 
+ (defn get-custom-sync-server-url
+   "Read the user-configured custom sync server URL from localStorage.
 --- a/src/main/frontend/handler/user.cljs
 +++ b/src/main/frontend/handler/user.cljs
-@@ -167,6 +167,19 @@
+@@ -167,6 +167,22 @@
       (set-token-to-localstorage! "" "" ""))
     (persist-auth-file!)))
  
-+(defn- <oidc-token-url
-+  "logseq-flake: the OIDC provider's token endpoint, from its discovery
-+  document. Cached in :auth/oauth-token-url, which is also where the db worker
-+  looks for it (sync-app-state passes that key through), so it is fetched once."
++(defn- <token-url
++  "logseq-flake: the token endpoint. With config/OIDC-ISSUER set, the
++  provider's, from its discovery document; otherwise upstream's Cognito one.
++  Cached in :auth/oauth-token-url, which is also where the db worker looks for
++  it (sync-app-state passes that key through), so discovery runs once."
 +  []
 +  (go
 +    (or (:auth/oauth-token-url @state/state)
-+        (let [resp (<! (http/get (str config/OIDC-ISSUER "/.well-known/openid-configuration")
-+                                 {:with-credentials? false}))]
-+          (when-let [url (get-in resp [:body :token_endpoint])]
-+            (state/set-state! :auth/oauth-token-url url)
-+            url)))))
++        (when-let [url (if config/OIDC-ISSUER
++                         (-> (<! (http/get (str config/OIDC-ISSUER "/.well-known/openid-configuration")
++                                           {:with-credentials? false}))
++                             (get-in [:body :token_endpoint]))
++                         (str "https://" config/OAUTH-DOMAIN "/oauth2/token"))]
++          (state/set-state! :auth/oauth-token-url url)
++          url))))
 +
  (defn- set-tokens!
    ([id-token access-token]
     (state/set-auth-id-token id-token)
-@@ -181,16 +194,23 @@
+@@ -181,16 +197,23 @@
     (state/set-auth-refresh-token refresh-token)
     (set-token-to-localstorage! id-token access-token refresh-token)
     (persist-auth-file!)
 +   ;; Sign-in and startup both land here: warm the endpoint cache now, so the
 +   ;; db worker has it before its first refresh rather than after ours.
-+   (<oidc-token-url)
++   (<token-url)
     (some->> (parse-jwt (state/get-auth-id-token))
              (reset! flows/*current-login-user))))
  
@@ -278,7 +278,7 @@
 -                            :client_id config/COGNITO-CLIENT-ID
 -                            :refresh_token refresh-token}}))
 +  (go
-+    (if-let [token-url (<! (<oidc-token-url))]
++    (if-let [token-url (<! (<token-url))]
 +      (<! (http/post token-url
 +                     {:form-params {:grant_type "refresh_token"
 +                                    :client_id config/COGNITO-CLIENT-ID
@@ -297,10 +297,10 @@
 -  (or (:auth/oauth-token-url state)
 -      (when-let [domain (not-empty (:auth/oauth-domain state))]
 -        (str "https://" domain "/oauth2/token"))))
-+  ;; logseq-flake: only the endpoint the main thread discovered from the OIDC
-+  ;; provider (frontend.handler.user/<oidc-token-url). Never guess Cognito's
-+  ;; /oauth2/token on :auth/oauth-domain: refreshing before discovery would
-+  ;; send the refresh token to Amazon.
++  ;; logseq-flake: only the endpoint the main thread resolved
++  ;; (frontend.handler.user/<token-url): the OIDC provider's, or Cognito's when
++  ;; none is configured. Never guess Cognito's here: with an OIDC provider, a
++  ;; refresh before discovery would send the refresh token to Amazon.
 +  (:auth/oauth-token-url state))
  
  (defn <refresh-id&access-token

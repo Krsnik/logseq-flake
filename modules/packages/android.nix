@@ -72,15 +72,14 @@ let
       stdenv,
       inputs,
 
-      # Identity provider and sync/publish endpoints; see _common.nix's
-      # defaultClientConfig for the keys. Any subset may be overridden —
-      # free, unlike the old single-FOD build: see the file header on why.
+      # Identity provider and sync/publish endpoints; keys in
+      # _client-config.nix. Any subset may be overridden — free, unlike the old
+      # single-FOD build: see the file header on why.
       clientConfig ? { },
     }:
 
     let
       common = callPackage ./_common.nix { inherit inputs; };
-      cfg = common.defaultClientConfig // clientConfig;
 
       # androidenv's SDK components are marked unfree and gate on an explicit
       # license acceptance; the ambient pkgs used elsewhere in this flake
@@ -220,7 +219,7 @@ let
         }}
 
         pnpmConfigHook
-        ${applyClientConfig cfg}
+        ${applyClientConfig clientConfig}
 
         install_pnpm_store ${pnpmDepsUi} packages/ui
 

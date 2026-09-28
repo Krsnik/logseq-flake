@@ -11,8 +11,8 @@ let
       pnpmConfigHook,
       inputs,
 
-      # Identity provider and sync/publish endpoints; see _common.nix's defaultClientConfig for the keys.
-      # Any subset may be overridden.
+      # Identity provider and sync/publish endpoints, baked in as defaults the
+      # server may still override at runtime; keys in _client-config.nix.
       clientConfig ? { },
     }:
 
@@ -28,8 +28,6 @@ let
         pnpmDepsRoot
         pnpmDepsUi
         ;
-
-      cfg = common.defaultClientConfig // clientConfig;
     in
     stdenvNoCC.mkDerivation (finalAttrs: {
       pname = "logseq-webapp";
@@ -61,7 +59,7 @@ let
             "packages/ui/package.json"
           ];
         }}
-        ${common.applyClientConfig cfg}
+        ${common.applyClientConfig clientConfig}
       '';
 
       preBuild = ''
@@ -91,6 +89,9 @@ let
 
         runHook postInstall
       '';
+
+      # What _webapp-nginx.nix's runner layers the environment over.
+      passthru = { inherit clientConfig; };
 
       meta = {
         description = "Privacy-first, open-source platform for knowledge management and collaboration (static web app)";

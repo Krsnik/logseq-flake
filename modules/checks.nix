@@ -136,7 +136,7 @@ in
 
             # And the refresh grant the client actually sends, at the token
             # endpoint it reads from the realm's discovery document
-            # (oidc-device-flow.patch) — the same document sign-in reads the
+            # (self-hosting.patch) — the same document sign-in reads the
             # device endpoint from, so assert that one is advertised too.
             discovery = jsonlib.loads(
                 machine.succeed(
@@ -158,12 +158,13 @@ in
         };
 
         # The client half of the self-hosted-IdP claim, end to end, in a real
-        # browser: a web app built with oidcIssuer signs in through its own UI
-        # against the realm `sync` uses, refreshes its token, and the sync
-        # server then receives a request carrying the token it got. Everything
-        # the logged-in flow needs is on that path (the device-flow patch and
-        # its endpoint discovery, the user_info stub in _webapp-nginx.nix), so
-        # if any piece is missing, no authenticated /graphs request arrives.
+        # browser: the stock web app, given an oidcIssuer at runtime, signs in
+        # through its own UI against the realm `sync` uses, refreshes its token,
+        # and the sync server then receives a request carrying the token it
+        # got. Everything the logged-in flow needs is on that path (the runtime
+        # config, the device-flow patch and its endpoint discovery, the
+        # user_info stub in _webapp-nginx.nix), so if any piece is missing, no
+        # authenticated /graphs request arrives.
         login =
           let
             hosts = [
@@ -217,16 +218,16 @@ in
               services.logseq-webapp = {
                 enable = true;
                 port = webappPort;
-                package = packages.logseq-webapp.override {
-                  clientConfig = {
-                    # The realm's issuer, the same value the servers get: every
-                    # endpoint the client needs is in its discovery document.
-                    oidcIssuer = "http://localhost:${toString keycloakPort}/realms/logseq";
-                    cognitoClientId = "logseq";
-                    apiDomain = "app.test";
-                    syncHttpBase = "https://sync.test";
-                    syncWsUrl = "wss://sync.test/sync/%s";
-                  };
+                # The stock package, configured at runtime: the generic build
+                # a published image ships, with nothing baked in for this realm.
+                clientConfig = {
+                  # The realm's issuer, the same value the servers get: every
+                  # endpoint the client needs is in its discovery document.
+                  oidcIssuer = "http://localhost:${toString keycloakPort}/realms/logseq";
+                  cognitoClientId = "logseq";
+                  apiDomain = "app.test";
+                  syncHttpBase = "https://sync.test";
+                  syncWsUrl = "wss://sync.test/sync/%s";
                 };
               };
 
@@ -559,8 +560,8 @@ in
 
         # The container images. Only the web app's gets a check: it is the one
         # with logic of its own (an nginx config that has to serve
-        # application/wasm for sqlite3.wasm and fall back to index.html for
-        # client-side routes, from an unprivileged process). The sync and
+        # application/wasm for sqlite3.wasm, and a runner that turns LOGSEQ_*
+        # variables into the client's config, from an unprivileged process). The sync and
         # publish images are thin wrappers around packages `sync`/`publish`
         # already cover, and the publish image is ~2.6GB, which is a lot of VM
         # disk for "the binary we already tested still starts".
@@ -574,6 +575,11 @@ in
                 imageFile = packages.logseq-webapp-image;
                 image = "logseq-webapp:latest";
                 ports = [ "8080:8080" ];
+                # The generic image, configured the way a consumer would.
+                environment = {
+                  LOGSEQ_OIDC_ISSUER = "https://id.example.org/realms/logseq";
+                  LOGSEQ_OIDC_CLIENT_ID = "logseq";
+                };
                 # Same shape as examples/docker-compose.yml: nginx cannot setuid
                 # with no capabilities, so it starts unprivileged instead.
                 extraOptions = [
@@ -604,19 +610,24 @@ in
             assert content_type("js/sqlite3.wasm") == "application/wasm"
             assert content_type("js/main.js").startswith("application/javascript")
 
-            # frontend/routes.cljs uses real paths, so a reload on /login has to
-            # reach index.html rather than 404.
+            # A stray real path still reaches the app (routes are fragments).
             code = machine.succeed(
                 "curl -so /dev/null -w %{http_code} http://localhost:8080/login"
             ).strip()
             assert code == "200", f"SPA fallback returned {code}"
+
+            # The environment reached the client's config, written by the runner
+            # as the unprivileged container user, with no rebuild of the bundle.
+            config = machine.succeed("curl -sSf http://localhost:8080/js/logseq-config.js")
+            assert '"oidcIssuer":"https://id.example.org/realms/logseq"' in config, config
+            assert '"cognitoClientId":"logseq"' in config, config
           '';
         };
 
         # No port to knock on, so check what a desktop install has to get right:
         # the launcher runs, the window manager can match the icon, and both halves
-        # of the endpoint patching (ClojureScript bundle and OCaml CLI bundle, which
-        # are substituted separately) actually landed.
+        # of the endpoint config landed: the app's baked js/logseq-config.js next
+        # to upstream's fallbacks, and the OCaml CLI's substituted literals.
         desktop =
           pkgs.runCommand "logseq-desktop-check"
             {
@@ -635,6 +646,7 @@ in
               node "$app/share/logseq/logseq-cli.js" --help | grep -q '^Usage: logseq'
 
               grep -q '${endpoints.apiDomain}' "$app/share/logseq/js/main.js"
+              grep -q '^window.LOGSEQ_CONFIG = ' "$app/share/logseq/js/logseq-config.js"
               grep -q '${endpoints.syncHttpBase}' "$app/share/logseq/logseq-cli.js"
 
               touch $out
@@ -679,6 +691,7 @@ in
               done
 
               unzip -p "$apk" assets/public/js/main.js | grep -q '${endpoints.apiDomain}'
+              unzip -p "$apk" assets/public/js/logseq-config.js | grep -q '^window.LOGSEQ_CONFIG = '
 
               touch $out
             '';
