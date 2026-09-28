@@ -30,6 +30,12 @@ writeText "logseq-webapp-nginx.conf" ''
     # nginx ships mime.types covering wasm; the browser refuses to instantiate
     # js/sqlite3.wasm as anything else.
     include ${nginx}/conf/mime.types;
+    # ...but not .mjs, which it would serve as text/plain; browsers refuse
+    # that for a module script, and js/pdfjs/pdf.mjs is how the PDF viewer
+    # loads.
+    types {
+      text/javascript mjs;
+    }
 
     # Off, not /dev/stdout: unlike error_log, nginx's access_log module has
     # no "stdout" magic keyword — it always does a path-based open(), which
@@ -47,10 +53,31 @@ writeText "logseq-webapp-nginx.conf" ''
       listen ${toString port};
       root ${webapp}/share/logseq-webapp;
       index index.html;
-      # frontend/routes.cljs uses real paths, not hash routes: without this a
-      # reload on e.g. /login is a 404.
+      # The app routes by fragment (#/login; frontend/core.cljs starts reitit
+      # with :use-fragment), so it never needs this itself. It only turns a
+      # stray real path like /login into the app rather than a 404.
       location / {
         try_files $uri $uri/ /index.html;
+      }
+
+      # The one piece of upstream's account API the logged-in flow cannot do
+      # without. :user/fetch-info-and-graphs (frontend/handler/events/ui.cljs)
+      # fetches no graphs and starts no sync unless
+      # POST https://<clientConfig.apiDomain>/file-sync/user_info returns a
+      # map, and all it reads is :UserGroups — rtc_2025_07_10 is the group
+      # user-handler/rtc-group? gates sync on. Static and the same for
+      # everyone, because it grants nothing: the sync server does its own
+      # auth, the client only uses this to decide whether to try. So point
+      # apiDomain at wherever this bundle is served.
+      location = /file-sync/user_info {
+        # The desktop and mobile apps call it cross-origin, with a bearer token.
+        add_header Access-Control-Allow-Origin * always;
+        add_header Access-Control-Allow-Headers "authorization, content-type" always;
+        if ($request_method = OPTIONS) {
+          return 204;
+        }
+        default_type application/json;
+        return 200 '{"UserGroups":["rtc_2025_07_10"]}';
       }
     }
   }

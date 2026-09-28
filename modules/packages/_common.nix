@@ -183,6 +183,11 @@ let
     publishApiBase = "https://logseq.io";
     syncWsUrl = "wss://api.logseq.io/sync/%s";
     syncHttpBase = "https://api.logseq.io";
+    # Not a literal but a switch: replace the Cognito-only login form with
+    # the OAuth device flow (./oidc-device-flow.patch) against
+    # https://<oauthDomain>. Off by default because Cognito has no device
+    # endpoint, so it would break every upstream-pool build.
+    oidcDeviceFlow = false;
   };
 
   clientConfigPatches = {
@@ -223,7 +228,10 @@ let
       '') patches
     );
 
-  applyClientConfig = cfg: applyConfigPatches cfg clientConfigPatches;
+  applyClientConfig =
+    cfg:
+    applyConfigPatches cfg clientConfigPatches
+    + lib.optionalString cfg.oidcDeviceFlow "patch -p1 < ${./oidc-device-flow.patch}\n";
   applyCliConfig = cfg: applyConfigPatches cfg cliClientConfigPatches;
 
   setupSources = { packageJsons }: ''

@@ -109,6 +109,12 @@
   # ordinary OAuth2 (grant_type=refresh_token + client_id, no secret), which
   # Keycloak accepts unchanged — verified by the `sync` check.
   #
+  # /oauth2/device is the same idea for sign-in: clients built with
+  # clientConfig.oidcDeviceFlow start the OAuth device flow there, then poll
+  # /oauth2/token (../modules/packages/oidc-device-flow.patch). The realm
+  # client needs the device grant switched on for it (logseq-realm.json's
+  # `attributes`) — verified by the `login` check.
+  #
   # TEST-ONLY: plain HTTP. Point `oauthDomain` at a TLS front end in anything
   # real, since the client always prefixes https://.
   services.nginx = {
@@ -122,6 +128,8 @@
       ];
       locations."/oauth2/token".proxyPass =
         "http://127.0.0.1:${toString keycloakPort}/realms/logseq/protocol/openid-connect/token";
+      locations."/oauth2/device".proxyPass =
+        "http://127.0.0.1:${toString keycloakPort}/realms/logseq/protocol/openid-connect/auth/device";
     };
   };
 

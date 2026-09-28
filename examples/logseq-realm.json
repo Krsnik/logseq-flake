@@ -11,6 +11,7 @@
       "directAccessGrantsEnabled": true,
       "redirectUris": ["http://localhost:*", "logseq://*"],
       "webOrigins": ["*"],
+      "attributes": { "oauth2.device.authorization.grant.enabled": "true" },
 
       "defaultClientScopes": ["basic", "acr", "profile", "email", "web-origins"],
       "protocolMappers": [

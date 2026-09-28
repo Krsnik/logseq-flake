@@ -1,0 +1,207 @@
+--- a/packages/ui/src/amplify/core.ts
++++ b/packages/ui/src/amplify/core.ts
+@@ -11,7 +11,11 @@
+   return translate('amplify', key, ...args)
+ }
+ 
++// The device-flow sign-in in ui.tsx reads oauthDomain/userPoolClientId off this.
++export const authConfig: any = {}
++
+ export function init({ lang, authCognito }: any) {
++  Object.assign(authConfig, authCognito)
+   // Load default language
+   setNSDicts('amplify', require('./lang').default)
+   if (lang) setLocale(lang)
+--- a/packages/ui/src/amplify/ui.tsx
++++ b/packages/ui/src/amplify/ui.tsx
+@@ -5,7 +5,7 @@
+ import { FormHTMLAttributes, useEffect, useRef, useState } from 'react'
+ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+ import { AlertCircleIcon, Loader2Icon, LucideEye, LucideEyeClosed, LucideX } from 'lucide-react'
+-import { AuthFormRootContext, t, useAuthFormState } from './core'
++import { AuthFormRootContext, authConfig, t, useAuthFormState } from './core'
+ import * as Auth from 'aws-amplify/auth'
+ import { Skeleton } from '@/components/ui/skeleton'
+ import * as React from 'react'
+@@ -148,10 +148,40 @@
+   return { countDownNum, startCountDown, setCountDownNum }
+ }
+ 
++// Self-hosted sign-in (logseq-flake patch, oidc-device-flow.patch): the OAuth
++// 2.0 Device Authorization Grant (RFC 8628) against https://<oauthDomain>,
++// instead of Cognito's own API. The actual login (password, MFA, brokering,
++// sign-up) happens on the IdP's own page in a real browser, so the same code
++// serves web, desktop and mobile with no redirect handling. Paths follow the
++// /oauth2/token convention the client's refresh already hardcodes
++// (src/main/frontend/handler/user.cljs), so the IdP needs one more rewrite of
++// the same kind: /oauth2/device -> its device authorization endpoint.
++async function oauthPost(endpoint: string, params: Record<string, string>) {
++  const res = await fetch(`https://${authConfig.oauthDomain}/oauth2/${endpoint}`, {
++    method: 'POST',
++    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
++    body: new URLSearchParams({ client_id: authConfig.userPoolClientId, ...params })
++  })
++  return { ok: res.ok, body: await res.json() }
++}
++
++function jwtClaims(jwt: string) {
++  const b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
++  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), c => c.charCodeAt(0))))
++}
++
+ export function LoginForm() {
+-  const { setErrors, setCurrentTab, onSessionCallback, userSessionRender } = useAuthFormState()
++  const { errors, setErrors, onSessionCallback, userSessionRender } = useAuthFormState()
+   const [loading, setLoading] = useState<boolean>(false)
+   const [sessionUser, setSessionUser] = useState<any>(null)
++  // A pending device grant, and whether the dialog has closed on it: stop
++  // polling then, rather than for the rest of the code's lifetime.
++  const [device, setDevice] = useState<any>(null)
++  const cancelled = useRef(false)
++  useEffect(() => {
++    cancelled.current = false
++    return () => { cancelled.current = true }
++  }, [])
+   const loadSession = async () => {
+     try {
+       const ret = await Auth.fetchAuthSession()
+@@ -210,77 +240,73 @@
+     )
+   }
+ 
+-  return (
+-    <FormGroup onSubmit={async (e) => {
+-      setErrors(null)
+-      e.preventDefault()
+-
+-      // get submit form input data
+-      const formData = new FormData(e.target as HTMLFormElement)
+-      const data = Object.fromEntries(formData.entries())
+-
+-      // sign in logic here
+-      try {
+-        setLoading(true)
+-        const username = (data.email as string)?.trim()
+-        const ret = await Auth.signIn({ username, password: data.password as string })
+-        const nextStep = ret?.nextStep?.signInStep
+-        if (!nextStep) throw new Error(JSON.stringify(ret))
+-        switch (nextStep) {
+-          case 'CONFIRM_SIGN_UP':
+-          case 'CONFIRM_SIGN_IN_WITH_EMAIL_CODE':
+-          case 'CONFIRM_SIGN_IN_WITH_TOTP_CODE':
+-            setCurrentTab({ type: 'confirm-code', props: { user: { ...ret, username }, nextStep } })
+-            return
+-          case 'RESET_PASSWORD':
+-            setCurrentTab({ type: 'reset-password', props: { user: { ...ret, username }, nextStep } })
+-            return
+-          case 'DONE':
+-            // signed in
+-            await loadSession()
+-            return
+-          default:
+-            throw new Error(`${t('Unsupported sign-in step:')} ${nextStep}`)
++  const signIn = async () => {
++    setErrors(null)
++    setLoading(true)
++    try {
++      const { body: grant } = await oauthPost('device', { scope: 'openid email profile' })
++      if (!grant.device_code) throw new Error(grant.error_description || grant.error || JSON.stringify(grant))
++      setDevice(grant)
++      let interval = (grant.interval || 5) * 1000
++      const deadline = Date.now() + grant.expires_in * 1000
++      while (!cancelled.current && Date.now() < deadline) {
++        await new Promise(resolve => setTimeout(resolve, interval))
++        const { ok, body } = await oauthPost('token', {
++          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
++          device_code: grant.device_code
++        })
++        if (ok) {
++          const claims = jwtClaims(body.id_token)
++          // The shape login-callback (frontend/handler/user.cljs) destructures.
++          // Unlike upstream's, it carries the refresh token itself: logged-in?
++          // keys off it, and there is no Cognito localStorage entry to scrape
++          // it from (auto-fill-refresh-token-from-cognito! is then a no-op).
++          setSessionUser({
++            username: claims['cognito:username'] || claims.preferred_username || claims.email,
++            signInUserSession: {
++              idToken: { jwtToken: body.id_token },
++              accessToken: { jwtToken: body.access_token },
++              refreshToken: { token: body.refresh_token }
++            }
++          })
++          return
+         }
+-      } catch (e) {
+-        setErrors({ password: { message: getAuthErrorMessage(e), title: t('Bad Response.') } })
+-        console.error(e)
+-      } finally {
+-        setLoading(false)
++        if (body.error === 'slow_down') interval += 5000
++        else if (body.error !== 'authorization_pending') throw new Error(body.error_description || body.error)
+       }
+-    }}>
+-      <InputRow id="email" type="text" required={true} name="email" autoFocus={true}
+-                autoComplete="username"
+-                label={t('Email')}/>
+-      <InputRow id="password" type="password" required={true} name="password"
+-                autoComplete="current-password"
+-                label={t('Password')}/>
+-
+-      <div className={'w-full'}>
+-        <Button type="submit" disabled={loading} className={'w-full'}>
+-          {loading && <Loader2Icon className="animate-spin mr-1" size={16}/>}
+-          {t('Sign in')}
+-        </Button>
+-        <p className={'pt-4 text-center'}>
++      if (!cancelled.current) throw new Error('Sign-in timed out, please try again.')
++    } catch (e: any) {
++      setErrors({ signIn: { message: e?.message ?? String(e), title: t('Bad Response.') } })
++      console.error(e)
++    } finally {
++      setDevice(null)
++      setLoading(false)
++    }
++  }
+ 
+-          <span className={'text-sm'}>
+-            <span className={'opacity-50'}>{t('Don\'t have an account?')} </span>
+-            <a
+-              onClick={() => setCurrentTab('signup')}
+-              className={'underline opacity-60 hover:opacity-80'}
+-            >{t('Sign up')}</a>
+-            <br/>
+-            <span className={'opacity-50'}>{t('or')} &nbsp;</span>
+-          </span>
+-
+-          <a onClick={() => {
+-            setCurrentTab('reset-password')
+-          }} className={'text-sm opacity-60 hover:opacity-80 underline'}>
+-            {t('Forgot your password?')}
+-          </a>
++  if (device) {
++    return (
++      <div className={'w-full flex flex-col items-center gap-4 text-center'}>
++        <p>
++          Open <a href={device.verification_uri_complete || device.verification_uri}
++                  target={'_blank'} rel={'noreferrer'} className={'underline'}>
++            {device.verification_uri}
++          </a> to sign in, and check that it shows this code:
+         </p>
++        <p id={'oidc-user-code'} className={'text-2xl font-mono tracking-widest'}>{device.user_code}</p>
++        <Loader2Icon className={'animate-spin opacity-50'} size={16}/>
+       </div>
+-    </FormGroup>
++    )
++  }
++
++  return (
++    <div className={'w-full flex flex-col gap-4'}>
++      {errors?.signIn && <ErrorTip error={errors.signIn} removeError={() => setErrors(null)}/>}
++      <Button id={'oidc-sign-in'} disabled={loading} className={'w-full'} onClick={signIn}>
++        {loading && <Loader2Icon className="animate-spin mr-1" size={16}/>}
++        {t('Sign in')}
++      </Button>
++    </div>
+   )
+ }
+ 

@@ -44,13 +44,14 @@ inputs.logseq.packages.${system}.logseq-webapp.override {
 
 | `clientConfig` key           | Sets                                                                         |
 | ---------------------------- | ---------------------------------------------------------------------------- |
-| `apiDomain`                  | Host of the upstream user/file-sync API                                      |
+| `apiDomain`                  | Host answering `/file-sync/user_info`; point it at your web app              |
 | `oauthDomain`                | Identity-provider host used for login                                        |
 | `cognitoClientId`            | OAuth client id                                                              |
 | `cognitoIdp`                 | Identity-provider issuer URL                                                 |
 | `userPoolId`                 | Cognito-shaped user-pool id                                                  |
 | `syncHttpBase` / `syncWsUrl` | Default sync server URL (`%s` is the graph id) — a *default* only, see below |
 | `publishApiBase`             | Default publish server URL — also a default only                             |
+| `oidcDeviceFlow`             | `true` replaces the Cognito login form with the OAuth device flow (see below) |
 
 `logseq-sync`, `logseq-sync-worker` and `logseq-publish` take no `clientConfig` —
 see [Setting the identity provider](#setting-the-identity-provider) for how they're configured instead.
@@ -147,12 +148,38 @@ One module per server/webapp target, `inputs.logseq.nixosModules.logseq-{webapp,
 
 (The `COGNITO_*` names are upstream's; they carry no Amazon-specific meaning and work with any OIDC provider.)
 
-**The client login button is the one piece still locked to Cognito** —
-it's `aws-amplify/auth`, which speaks Cognito's own API rather than OIDC.
-Everything *after* getting a token is provider-neutral,
-so a token minted by your own realm does work once placed in `localStorage` by hand;
-making the sign-in button itself do that is planned but not yet built.
-See `AGENTS.md`'s "Identity provider contract" section and `docs/self-hosted-identity.md` for the full detail, caveats and plan.
+**Clients sign in with the OAuth device flow** when built with `oidcDeviceFlow = true`.
+The login dialog shows a short code and a link to your identity provider,
+you log in there with whatever it offers (password, MFA, or a brokered GitLab/Forgejo login),
+and the app picks up the tokens. The same code runs on web, desktop and Android:
+
+```nix
+clientConfig = {
+  oidcDeviceFlow = true;
+  oauthDomain = "id.example.org";   # serves /oauth2/device and /oauth2/token
+  cognitoClientId = "logseq";       # your IdP's public client
+  apiDomain = "notes.example.org";  # where logseq-webapp is served
+  syncHttpBase = "https://sync.example.org";
+  syncWsUrl = "wss://sync.example.org/sync/%s";
+};
+```
+
+Your identity provider needs:
+
+- a public client with the OAuth 2.0 device authorization grant enabled;
+- `https://<oauthDomain>/oauth2/device` and `/oauth2/token` routed to its device-authorization and token endpoints,
+  since the client hardcodes those Cognito-style paths (`examples/keycloak.nix` shows the two nginx locations),
+  with CORS allowed for your app's origins;
+- a scalar `aud` equal to the client id on the access token, and a `cognito:username` claim on the id token
+  (`examples/logseq-realm.json` has both mappers).
+
+And `apiDomain` has to answer `POST /file-sync/user_info` with `{"UserGroups":["rtc_2025_07_10"]}`.
+Without it the app signs in but never syncs.
+The web app's image, NixOS module and `nix run` wrapper already serve exactly that, so point `apiDomain` at your web app.
+
+Proven end to end for the web app by `checks.login`.
+Desktop and Android run the same code but haven't been exercised end to end yet.
+See `docs/self-hosted-identity.md` for how it works and what's left.
 
 ## More detail
 

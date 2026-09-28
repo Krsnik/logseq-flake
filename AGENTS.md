@@ -9,7 +9,7 @@ identity provider (self-hosted Keycloak) and sync/publish endpoints
 configurable at build time, so none of it is hardwired to upstream's
 Cognito pool or `logseq.io`/`logseq.com`.
 
-## Current state (2026-09-27)
+## Current state (2026-09-28)
 
 All work lives in `./logseq-flake/`, a standalone flake. Its `nixpkgs`/
 `flake-parts`/`import-tree` inputs are the tooling; the pinned Logseq source
@@ -25,13 +25,14 @@ by a check in `./logseq-flake/modules/checks.nix` (`nix flake check`):
 |Check|What it proves|
 |-|-|
 |`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`cognito:username`, and the refresh grant works through the hardcoded-`/oauth2/token` rewrite|
+|`login`|VM, same realm: a web app built with `oidcDeviceFlow` signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It starts the device flow cross-origin via the `/oauth2/device` rewrite, completes Keycloak's device/login/consent pages, and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
 |`webapp`|VM: nginx serves the bundle, the app entry point loads|
 |`desktop`|Launcher executable, bundled CLI runs, `StartupWMClass` matches the wrapper's `--class`, both the cljs and OCaml halves carry the configured endpoints|
 |`publish`|VM: the same node as `sync`. The worker runs outside Cloudflare at all (its Durable Object + R2 bindings come from wrangler's local runtime), serves its rendered home page and inlined static assets, `DELETE /pages/:g/:p` is 401 without a token and **404 with one the local realm minted** — past `verify-jwt`, having fetched the realm's JWKS from inside workerd|
 |`android`|The APK is a real APK and its bundled JS carries the configured endpoints|
 |`containers`|VM running podman: the web app image serves unprivileged under `cap_drop=ALL`, `js/sqlite3.wasm` comes back as `application/wasm`, and `/login` falls back to `index.html`|
 |`sync-worker`|VM, same realm as `sync`/`publish`: `/health` public, `/graphs` 401 without a token, `/openapi.json` proves the semantic-REST build step actually produced something, a realm-minted token gets past `verify-jwt` (then hits the documented D1/`cognito:username` upstream bug — asserted explicitly, not silently)|
-|`webapp-service`|VM: `services.logseq-webapp`'s own dedicated nginx process serves the bundle, `application/wasm` for `sqlite3.wasm`, `/login` falls back to `index.html` — the module wiring, not just the package (that's `webapp`, above)|
+|`webapp-service`|VM: `services.logseq-webapp`'s own dedicated nginx process serves the bundle, `application/wasm` for `sqlite3.wasm`, `text/javascript` for `pdf.mjs`, `/login` falls back to `index.html` — the module wiring, not just the package (that's `webapp`, above)|
 |`desktop-module`|Eval-only (no port to knock on, no VM): a throwaway `nixosSystem` with `programs.logseq.enable = true` actually lands `packages.logseq` in `environment.systemPackages` — `nix flake check`'s own module type-check proves the module evaluates, this proves `enable` does something|
 
 |Target|Package|Status|`clientConfig` override|
@@ -344,9 +345,14 @@ Four things worth knowing, none of which were obvious up front:
    until the DB worker dies. nixpkgs' `nginx` ships a `mime.types` that covers
    wasm, so including it is enough — but a hand-written server config or a
    minimal file server (`darkhttpd` and friends) would silently get this wrong.
-1. **It also needs a `try_files … /index.html` fallback**, because
-   `frontend/routes.cljs` uses real paths, not hash routes: without it a reload
-   on `/login` is a 404.
+   The same `mime.types` does *not* cover `.mjs`, which it serves as
+   `text/plain`; browsers refuse that for a module script, and
+   `js/pdfjs/pdf.mjs` is the PDF viewer. The recipe adds the one type.
+1. **The `try_files … /index.html` fallback is a nicety, not a requirement.**
+   An earlier version of this file said the app uses real paths. It doesn't:
+   `frontend/core.cljs` starts reitit with `:use-fragment`, so routes are
+   `#/login` and every reload fetches `/`. The fallback only turns a stray
+   `/login` into the app instead of a 404.
 1. **Both server images need `dockerTools.caCertificates`.** The JWKS fetch
    fails at certificate verification against any https issuer otherwise —
    invisible in the VM checks, where Keycloak is plain HTTP.
@@ -448,7 +454,7 @@ default baked into `logseq-webapp-image` itself, so `checks.containers`
 this path.
 
 `examples/docker-build/Dockerfile` is the actual `--build-arg` front door:
-one `ARG` per `defaultClientConfig` key (8 total, same defaults as
+one `ARG` per `defaultClientConfig` key (9 total, same defaults as
 `_common.nix`'s), a `RUN` step that shells `jq -n --arg ... '$ARGS.named'`
 (not string interpolation, which breaks on the `:`/`/`/`%` characters real
 endpoint URLs contain) to turn those into `client-config.json`, then `nix
@@ -506,27 +512,24 @@ before adapting it to a different provider:
   one-line rewrite in front for this. Without it, sign-in looks fine and the
   first refresh fails.
 
-**Clients: the login button itself is Cognito-only, but everything
-downstream of getting a token is not.** The login UI is `LSAuthenticator`
-(`packages/ui/src/amplify/`), `aws-amplify/auth` initialised with
-`authCognito` (`components/user/login.cljs`) — Amplify's Cognito provider
-speaks Cognito's own API, not OIDC, so repointing `oauthDomain`/
-`userPoolId`/`cognitoClientId` at Keycloak does not make sign-in work.
-`restore-tokens-from-localstorage`, which runs on every app start, is
-provider-neutral: it reads `id-token`/`access-token`/`refresh-token` as
-plain `localStorage` strings, checks `exp`, and logs the app in with no
-Cognito call — so a token minted by your own realm and placed there by hand
-does work, with three caveats (first two verified by `checks.sync`, third
-not):
-
-1. The `cognito:username` claim above.
-2. The `/oauth2/token` refresh rewrite above.
-3. **`api.logseq.com/file-sync/user_info` is still on the critical path**,
-   and nothing here implements it. `:user/fetch-info-and-graphs` won't fetch
-   graphs or start RTC unless `<user-info` (a POST to
-   `https://<apiDomain>/file-sync/user_info`) returns a map. `apiDomain` is
-   settable, so a stub would do, but the exact response shape it must return
-   has not been established — see `docs/self-hosted-identity.md` Phase 1.
+**Clients: sign-in is the OAuth device flow (RFC 8628), opt-in with
+`clientConfig.oidcDeviceFlow = true`.** Upstream's login form is Amplify
+speaking Cognito's own API, so repointing `oauthDomain` never made sign-in
+work. `modules/packages/oidc-device-flow.patch`, applied by
+`applyClientConfig` (so web, desktop, Android and the images all get it the
+same way), replaces that form. It starts a device grant at
+`https://<oauthDomain>/oauth2/device`, polls `/oauth2/token`, and hands
+`login-callback` the session shape it already expects. Everything downstream is
+upstream's own. It's off by default because Cognito has no device endpoint:
+unset, every package's drvPath is byte-identical to before the patch existed.
+The IdP needs the device grant on a public client plus an `/oauth2/device`
+rewrite next to the `/oauth2/token` one. **`user_info` is proven
+load-bearing**, and the web app's nginx now serves the stub for it (point
+`apiDomain` at the web app). `checks.login` proves all of it for the web app.
+**Desktop and Android run the same compiled code but are not
+runtime-verified.** Why this mechanism and not a "Cognito-compatible" IdP
+(none is usable) or redirect+PKCE, the negative `user_info` experiment, and
+the traps: `docs/self-hosted-identity.md`.
 
 **Endpoints are also settable at runtime, not just via `clientConfig`.**
 Upstream reads two keys from `localStorage`, both exposed in Settings, so
@@ -569,55 +572,39 @@ on the GitLab/Forgejo side (redirect URI
 ]
 ```
 
-This is realm config only — it touches no package here, so it's not
-exercised by `nix flake check` (that would need a live external instance to
-log into), and it's gated by the same Cognito-only login limit as any other
-IdP: until Phase 2 of `docs/self-hosted-identity.md` lands, the client has
-no UI that reaches Keycloak at all, brokered or not.
+This is realm config only, so `nix flake check` doesn't exercise it (that
+would need a live external instance to log into). With the device flow the
+brokered login happens on Keycloak's own pages in a browser, so it needs
+nothing from the client.
 
 ## Next up
 
-### 1. The client-side identity gap — planned in full
+### 1. Client sign-in: what's left
 
-**Read `./logseq-flake/docs/self-hosted-identity.md` before touching this.** It
-is the executable plan, with verified file:line references; this is only the
-summary.
+Client sign-in against a self-hosted IdP is done for the web app and proven
+(see "Identity provider contract" above, and `docs/self-hosted-identity.md`
+for the detail and traps). Remaining, roughly in order of value:
 
-The gap is three things, not one. Two are now done and proven:
-
-- **Endpoints already have a runtime path**, which the first pass missed.
-  Upstream reads `localStorage["sync-server-url"]`/`["publish-server-url"]` and
-  exposes both in Settings; the sync one also flips `rtc-group?`, which clears
-  the alpha/beta gate on fetching remote graphs. So `clientConfig`'s sync/publish
-  keys are compiled-in *defaults*, not a requirement.
-- **The token contract is proven.** Amplify only mints the first token pair;
-  `restore-tokens-from-localstorage` then works off three plain localStorage
-  strings with no Cognito call. `checks.sync` asserts the rest against the real
-  realm — `exp`/`sub`/`email`/`cognito:username` on the id token, and refresh
-  through the `/oauth2/token` rewrite `examples/keycloak.nix` ships.
-
-What remains, in order:
-
-1. **Phase 1 — `api.logseq.com/file-sync/user_info`.** The gate, and the biggest
-   unknown in the project. `:user/fetch-info-and-graphs` fetches no graphs and
-   starts no RTC unless `<user-info` returns a map, and nothing here implements
-   that endpoint. Only `:UserGroups` is read and every accessor is nil-safe, so
-   an nginx `return 200 '{"UserGroups":["rtc_2025_07_10"]}'` may be the entire
-   fix — but that is inference from source, never executed. The plan's experiment
-   settles it, including the negative case.
-1. **Phase 2 — generic OIDC sign-in.** Smaller than it sounds: all Cognito
-   coupling is behind `window.LSAuth` — four members, one consumer
-   (`components/user/login.cljs`, no separate mobile or desktop login) — so a
-   drop-in adapter doing Authorization Code + PKCE and returning an
-   amplify-shaped `signInUserSession` needs no changes downstream.
-1. **Phase 3 — fold into the packaging**, and only then drop the README's
-   "login is Cognito-only" caveat.
+1. **Runtime-verify desktop and Android.** Desktop could get a VM check: the
+   Electron binary under the same CDP driver `checks.login` uses. Android
+   can't be exercised in a NixOS VM.
+1. **`logseq login` (the CLI)** still does auth-code + PKCE against
+   `https://<oauthDomain>/oauth2/authorize` with its own
+   `CLI-COGNITO-CLIENT-ID`, which `applyClientConfig` doesn't patch. An
+   `/oauth2/authorize` rewrite plus that one literal would plausibly be
+   enough, since the realm already allows `http://localhost:*` redirects.
+   Not attempted.
+1. **Sign-out ends the app session, not the IdP's.** Amplify's `signOut` has
+   no tokens to revoke, so signing in again skips the IdP password prompt
+   while its session cookie lives. Probably fine; revisit if it isn't.
 
 ### 2. Literals `clientConfig` still misses
 
-`REGION` and `IDENTITY-POOL-ID` in `src/main/frontend/config.cljs`, plus the
-`https://api.logseq.com/logseq/version` update-check ping. All cosmetic while
-login is Cognito-locked; cheap to add to `applyClientConfig` if anyone cares.
+`REGION` and `IDENTITY-POOL-ID` in `src/main/frontend/config.cljs` are dead
+with the device flow: Amplify never holds tokens, so it never calls AWS. That
+makes them "remove", not "add". The `https://api.logseq.com/logseq/version`
+update-check ping is the one live upstream call left. It's cosmetic, and cheap
+to add to `applyClientConfig` if anyone cares.
 
 ## Boundaries (intentionally not touched)
 
@@ -676,7 +663,8 @@ derivation: all four `drvPath`s were byte-identical before and after.
   `mkPnpmDeps` (helper for any standalone `--ignore-workspace` pnpm
   subproject), `pnpmStoreHelper`, `setupSources` (the identical opening
   every target's `preConfigure` had), `defaultClientConfig`/
-  `applyClientConfig` (cljs sources) and `applyCliConfig` (the OCaml CLI's
+  `applyClientConfig` (cljs sources, plus `./oidc-device-flow.patch` when
+  `oidcDeviceFlow` is set) and `applyCliConfig` (the OCaml CLI's
   own copies of the same literals, `cli/lib/{auth_state,cli_config}.ml`) —
   both are thin wrappers around one generic `applyConfigPatches` engine plus
   a per-file-list data table, so a literal's upstream value is written once
@@ -781,10 +769,10 @@ derivation: all four `drvPath`s were byte-identical before and after.
   (`Dockerfile`, checked-in `client-config.json` placeholder,
   `load-image.sh`), see "Docker-native identity-provider config" above.
 - `README.md` — the outward-facing version of this file.
-- `docs/self-hosted-identity.md` — the plan for the one thing still genuinely
-  unfinished: clients that can sign in against a self-hosted IdP. Phases,
-  acceptance criteria, verified file:line references and the traps already fallen
-  into once.
+- `docs/self-hosted-identity.md` — how clients sign in against a self-hosted
+  IdP (the device-flow patch, the `user_info` stub), what's proven and what
+  isn't, with verified file:line references and the traps already fallen into
+  once.
 
 Outside the flake, `./modules/packages/logseq.nix` re-exports
 `inputs.logseq.packages.<system>` so `nix build path:.#logseq` keeps
@@ -827,6 +815,15 @@ Document non-obvious parts via an inline comment (why, not what). Project
 memory (queryable by a fresh session) has the full detail behind every
 "done" claim above — this file is the map, not the territory.
 
-context:
+## Open Tasks
+
+The goal is a full end-to-end self-hosted setup with a custom identity provider.
+
+Make the clients talk to any OICD provider and not just cognito.
+Using patch files (applied in the nix build) is a viable strategy if it cannot be solved simpler.
+
+Extra Context for self-hosted setups:
 
 <https://abhilesh.github.io/blog/2026/self-hosting-logseq-sync/>
+
+<https://medium.com/@4shutosh/how-to-self-host-logseq-db-graph-sync-d62d589f06a4>

@@ -151,6 +151,214 @@ in
           '';
         };
 
+        # The client half of the self-hosted-IdP claim, end to end, in a real
+        # browser: a web app built with oidcDeviceFlow signs in through its own
+        # UI against the realm `sync` uses, and the sync server then receives
+        # a request carrying the token it got. Everything the logged-in flow
+        # needs is on that path (the device-flow patch, the /oauth2/*
+        # rewrites, the user_info stub in _webapp-nginx.nix), so if any piece
+        # is missing, no authenticated /graphs request ever arrives.
+        login =
+          let
+            hosts = [
+              "idp.test"
+              "app.test"
+              "sync.test"
+            ];
+            # TEST-ONLY: one self-signed cert for all three, and a browser that
+            # ignores it. TLS at all because the client hardcodes https:// for
+            # oauthDomain and apiDomain, and an https page cannot open a ws://
+            # sync socket.
+            cert = pkgs.runCommand "logseq-test-cert" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+              mkdir $out
+              openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=logseq.test \
+                -addext subjectAltName=${lib.concatMapStringsSep "," (h: "DNS:${h}") hosts} \
+                -keyout $out/key.pem -out $out/cert.pem
+            '';
+            tls = {
+              onlySSL = true;
+              sslCertificate = "${cert}/cert.pem";
+              sslCertificateKey = "${cert}/key.pem";
+            };
+            webappPort = 8081;
+            # Chrome DevTools Protocol, one Runtime.evaluate per call: enough to
+            # click a button and read the DOM, with nothing to install.
+            cdp = pkgs.writeText "cdp.mjs" ''
+              const targets = await (await fetch('http://127.0.0.1:9222/json')).json()
+              const ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl)
+              await new Promise(resolve => ws.onopen = resolve)
+              ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate',
+                params: { expression: process.argv[2], awaitPromise: true, returnByValue: true } }))
+              const { result } = await new Promise(resolve => ws.onmessage = e => resolve(JSON.parse(e.data)))
+              console.log(JSON.stringify(result.result.value ?? null))
+              ws.close()
+            '';
+          in
+          pkgs.testers.runNixOSTest {
+            name = "logseq-login";
+
+            nodes.machine = {
+              imports = [
+                stack
+                nixosModules.logseq-webapp
+              ];
+              # Keycloak and a browser running the whole app.
+              virtualisation.memorySize = lib.mkForce 4096;
+              virtualisation.cores = 4;
+              networking.hosts."127.0.0.1" = hosts;
+
+              services.logseq-webapp = {
+                enable = true;
+                port = webappPort;
+                package = packages.logseq-webapp.override {
+                  clientConfig = {
+                    cognitoClientId = "logseq";
+                    oauthDomain = "idp.test";
+                    apiDomain = "app.test";
+                    syncHttpBase = "https://sync.test";
+                    syncWsUrl = "wss://sync.test/sync/%s";
+                    oidcDeviceFlow = true;
+                  };
+                };
+              };
+
+              services.nginx.virtualHosts = {
+                # keycloak.nix's /oauth2/* rewrites, on the https host the client
+                # was built to call. 0.0.0.0 like the other two vhosts, not
+                # 127.0.0.1: nginx picks the listen socket before the
+                # server_name, so a more specific address would swallow every
+                # request to 127.0.0.1:443, whatever its Host.
+                oauth-shim = tls // {
+                  serverName = "idp.test";
+                  listen = [
+                    {
+                      addr = "0.0.0.0";
+                      port = 443;
+                      ssl = true;
+                    }
+                  ];
+                };
+                "app.test" = tls // {
+                  locations."/".proxyPass = "http://127.0.0.1:${toString webappPort}";
+                };
+                "sync.test" = tls // {
+                  locations."/" = {
+                    proxyPass = "http://127.0.0.1:${toString syncPort}";
+                    proxyWebsockets = true;
+                  };
+                };
+              };
+
+              environment.systemPackages = [
+                pkgs.chromium
+                pkgs.nodejs
+              ];
+            };
+
+            testScript = ''
+              import html
+              import json
+              import re
+              import shlex
+              from urllib.parse import urljoin
+
+              machine.wait_for_unit("keycloak.service")
+              machine.wait_for_open_port(${toString keycloakPort})
+              machine.wait_for_unit("logseq-sync.service")
+              machine.wait_for_open_port(${toString syncPort})
+              machine.wait_for_unit("logseq-webapp.service")
+              machine.wait_for_unit("nginx.service")
+
+              # The user_info stub answers the preflight the desktop app sends...
+              machine.succeed(
+                  "curl -ksSf -X OPTIONS -H 'Origin: lsp://logseq.com' -D - -o /dev/null"
+                  " https://app.test/file-sync/user_info | grep -qi '^access-control-allow-headers: authorization'"
+              )
+              # ...and the POST, with the group that gates sync.
+              machine.succeed(
+                  "curl -ksSf -X POST https://app.test/file-sync/user_info"
+                  """ | jq -e '.UserGroups | index("rtc_2025_07_10")'"""
+              )
+
+              machine.succeed(
+                  "systemd-run --unit=chromium -- ${lib.getExe pkgs.chromium} --headless --no-sandbox"
+                  " --ignore-certificate-errors --enable-logging=stderr"
+                  " --remote-debugging-port=9222 --remote-allow-origins=*"
+                  " --user-data-dir=/tmp/chromium https://app.test/"
+              )
+
+              def js(expr):
+                  return json.loads(machine.succeed(f"node ${cdp} {shlex.quote(expr)}"))
+
+              def wait_for_js(expr, timeout=300):
+                  machine.wait_until_succeeds(
+                      f"node ${cdp} {shlex.quote(expr)} | grep -qx true", timeout=timeout
+                  )
+
+              try:
+                  # The app boots and reaches the patched form. It routes by
+                  # fragment, and its first start (creating the Demo graph) sends
+                  # it home, so keep asking for #/login until that sticks.
+                  wait_for_js(
+                      "(location.hash === '#/login' || (location.hash = '#/login'),"
+                      " document.getElementById('oidc-sign-in') !== null)"
+                  )
+                  # Starting the device flow gets a code from the realm, across
+                  # origins, through keycloak.nix's /oauth2/device rewrite.
+                  js("document.getElementById('oidc-sign-in').click()")
+                  wait_for_js("document.getElementById('oidc-user-code') !== null", timeout=60)
+                  user_code = js("document.getElementById('oidc-user-code').textContent")
+
+                  # The user's half, on the IdP's own pages: open the verification
+                  # link, then submit whatever Keycloak shows (login, then
+                  # consent) until it stops showing forms. The app polls meanwhile.
+                  def keycloak(args):
+                      return machine.succeed(f"curl -sSL -b /tmp/kc -c /tmp/kc {args}")
+
+                  page = keycloak(
+                      f"'http://localhost:${toString keycloakPort}/realms/logseq/device?user_code={user_code}'"
+                  )
+                  for _ in range(4):
+                      form = re.search(r'<form[^>]*action="([^"]+)"', page)
+                      if not form:
+                          break
+                      fields = {
+                          m["name"]: html.unescape(m["value"])
+                          for m in re.finditer(
+                              r'<input(?=[^>]*name="(?P<name>[^"]+)")(?=[^>]*value="(?P<value>[^"]*)")',
+                              page,
+                          )
+                      }
+                      if 'name="username"' in page:
+                          fields.update(username="test", password="test")
+                      if 'name="accept"' in page:
+                          fields["accept"] = "Yes"
+                      action = urljoin(
+                          "http://localhost:${toString keycloakPort}/", html.unescape(form[1])
+                      )
+                      data = " ".join(
+                          f"--data-urlencode {shlex.quote(f'{k}={v}')}" for k, v in fields.items()
+                      )
+                      page = keycloak(f"{data} {shlex.quote(action)}")
+                  assert "Device Login Successful" in page, page
+
+                  # The app now holds the realm's tokens, including the refresh
+                  # token logged-in? keys off...
+                  wait_for_js("!!localStorage.getItem('refresh-token')", timeout=120)
+                  # ...and uses them: user_info returned a map, so the logged-in
+                  # flow went on to list the user's graphs, and the sync server
+                  # accepted the token that request carried.
+                  machine.wait_until_succeeds(
+                      """grep -qE '"GET /graphs [^"]*" 200' /var/log/nginx/access.log""",
+                      timeout=180,
+                  )
+              except Exception:
+                  print(machine.execute("journalctl -u chromium --no-pager | grep CONSOLE | tail -n 60")[1])
+                  print(machine.execute("tail -n 50 /var/log/nginx/access.log")[1])
+                  raise
+            '';
+          };
+
         # The sync *worker* — deps/db-sync's Cloudflare Worker build — against
         # the same realm. Same auth contract as `sync` (it's the same base
         # sync protocol underneath), plus proof the semantic REST/MCP layer
@@ -317,6 +525,8 @@ in
                 ).strip()
 
             assert content_type("js/sqlite3.wasm") == "application/wasm"
+            # Module scripts are refused as text/plain; this one is the PDF viewer.
+            assert content_type("js/pdfjs/pdf.mjs") == "text/javascript"
 
             code = machine.succeed(
                 "curl -so /dev/null -w %{http_code} http://localhost:8080/login"

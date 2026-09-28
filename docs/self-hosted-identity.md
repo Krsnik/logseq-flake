@@ -1,220 +1,121 @@
-# Plan: a self-hosted identity provider that the clients can actually use
+# Clients against a self-hosted identity provider
 
-Status as of 2026-09-26. The servers are done and proven; the clients are not.
-This is the plan for closing that, written so a fresh session can execute it
-without re-deriving the analysis. Every file reference is to the upstream
-checkout at `../logseq` (rev 2.0.1).
-
-## Where things actually stand
+Status as of 2026-09-28: **done for the web app and proven end to end; built
+the same way for desktop and Android, but not runtime-verified there.** File
+references are to the pinned 2.0.1 source (the `logseq-src` flake input), not
+to `../logseq`, which is a newer nightly with a rewritten login component.
 
 | Piece | State | Evidence |
 | - | - | - |
-| Sync + publish accept any OIDC provider | **done, proven** | `checks.sync`, `checks.publish` — realm-minted token gets 200/404, 401 without |
-| Token contract the clients need | **done, proven** | `checks.sync` asserts `exp`/`sub`/`email`/`cognito:username` on the id token, and refresh through the `/oauth2/token` rewrite |
-| Endpoint overriding | **done, and largely already upstream's** | `localStorage` `sync-server-url` / `publish-server-url`, both in Settings; `clientConfig` only supplies defaults |
-| `user_info` on the critical path | **unknown — blocks everything below** | read from source only; never executed |
-| Sign-in against a non-Cognito IdP | **not started** | the amplify component |
+| Sync + publish accept any OIDC provider | done, proven | `checks.sync`, `checks.publish` |
+| Token contract the clients need | done, proven | `checks.sync`: claims on the id token, refresh through the `/oauth2/token` rewrite |
+| Endpoint overriding | done, mostly upstream's own | `localStorage` `sync-server-url` / `publish-server-url`; `clientConfig` supplies defaults |
+| `user_info` on the critical path | done, proven load-bearing | stub in `modules/packages/_webapp-nginx.nix`; negative case below |
+| Sign-in against a non-Cognito IdP | done for web, proven | `checks.login`; `modules/packages/oidc-device-flow.patch` |
+| Same, desktop and Android | built, not runtime-verified | same compiled `ui.js`; see "Not verified" |
 
-Read `../README.md`'s "Setting the identity provider" section and
-`../AGENTS.md`'s "Identity provider contract" section first; together they
-state the same split, briefly and then in full. The rest of this file is
-the part that is not done.
+## How sign-in works
 
-## Phase 1 — settle the `user_info` dependency
+`clientConfig.oidcDeviceFlow = true` makes `applyClientConfig` apply
+`oidc-device-flow.patch` to `packages/ui/src/amplify/{core.ts,ui.tsx}`. That is
+the one place all Cognito coupling sits: `window.LSAuth`, whose only consumer is
+`src/main/frontend/components/user/login.cljs`. `LoginForm` becomes an OAuth 2.0
+Device Authorization Grant (RFC 8628):
 
-**This is the gate. Do it first, and do not start Phase 2 until it is answered**,
-because if the logged-in flow cannot complete without a service we do not
-provide, a working sign-in button buys nothing.
+1. POST `https://<oauthDomain>/oauth2/device` (`client_id`, `scope=openid email profile`).
+2. Show `user_code` and a link to `verification_uri_complete`, which the user
+   opens in any browser. Password, MFA, brokering and sign-up all happen there.
+3. Poll `https://<oauthDomain>/oauth2/token` with the device-code grant,
+   honouring `interval` and `slow_down`, and stop if the dialog closes.
+4. Hand the tokens to `userSessionRender` in the shape `login-callback`
+   (`src/main/frontend/handler/user.cljs`) destructures. Unlike upstream's, the
+   session carries the refresh token itself: `logged-in?` keys off it, and there
+   is no Cognito localStorage entry for `auto-fill-refresh-token-from-cognito!`
+   to scrape it from.
 
-### The question
+Nothing downstream changes: `set-tokens!`, localStorage, the refresh loop and
+the servers were already provider-neutral.
+
+### Why this mechanism (chosen 2026-09-28)
+
+- **No usable "Cognito-compatible" IdP exists.** cognito-local supports only
+  `USER_PASSWORD_AUTH`, while Amplify's `signIn` defaults to SRP, and it calls
+  itself a dev emulator. moto implements `USER_SRP_AUTH`, but its
+  `respond_to_auth_challenge` only checks that `PASSWORD_CLAIM_SIGNATURE` is
+  non-empty, so *any* password logs anyone in (read in its source).
+  LocalStack's Cognito is paid, and still an emulator. Any of them would also
+  need Cognito's hosted-UI `/oauth2/token`, which the client's refresh calls.
+  Amplify 6.19.1 does honour `userPoolEndpoint`, so reaching one was never the
+  obstacle.
+- **Password grant** would keep the in-app form, but it works only with IdPs
+  that allow it: no brokering, no IdP-side MFA.
+- **Redirect + PKCE** needs a separate patch per platform. Electron's
+  `will-navigate` handler sends every https navigation to the system browser,
+  so an in-window redirect never returns; Android needs a `logseq://` deep
+  link; the web needs a callback page.
+- **Device flow** runs the login on the IdP's own pages in a real browser, so
+  one code path covers all three. Its only UX cost is confirming a code.
+
+The IdP side, as `examples/keycloak.nix` + `examples/logseq-realm.json` do it:
+
+- device grant enabled on a public client (`attributes`);
+- `/oauth2/device` and `/oauth2/token` on the `oauthDomain` host, rewritten to
+  the realm's endpoints (Keycloak's own CORS covers both, via `webOrigins`);
+- the audience mapper and `cognito:username` claim (see `AGENTS.md`).
+
+And `apiDomain` points at wherever the web app is served, because its nginx
+answers `POST /file-sync/user_info` with `{"UserGroups":["rtc_2025_07_10"]}`.
+
+## `user_info`: why the stub, and the proof
 
 `:user/fetch-info-and-graphs` (`src/main/frontend/handler/events/ui.cljs:446`)
-does nothing unless `<user-info` returns a map:
+does nothing unless `<user-info` returns a map, and reads only `:UserGroups`.
+`rtc_2025_07_10` satisfies `rtc-group?` (`handler/user.cljs:359`) even when no
+`sync-server-url` is set in localStorage, which is the case for a preconfigured
+build. The stub is static and the same for everyone because it grants nothing:
+the sync server does its own auth.
 
-```clojure
-(let [result (async/<! (user-handler/<user-info user-handler/remoteapi))]
-  (cond
-    (instance? ExceptionInfo result) nil      ; <- silently gives up
-    (map? result) (do ... fetch graphs, start RTC ...)))
-```
+Run both ways on 2026-09-28, same VM as `checks.login`:
 
-`<user-info` (`src/main/frontend/handler/user.cljs:515`) is `POST https://<API-DOMAIN>/file-sync/user_info`
-with `Authorization: Bearer <id-token>` (`<request-once`, `src/main/frontend/handler/user.cljs:428`).
-`API-DOMAIN` defaults to `api.logseq.com` and is `clientConfig.apiDomain`.
-**Nothing in this flake implements that endpoint, and `deps/db-sync` does not
-either** — it is upstream's user/file-sync API, a third service beyond sync and
-publish.
+- **With the stub:** `POST /file-sync/user_info` 200, then `GET /graphs` 200
+  and `GET /e2ee/user-keys` 200 at the sync server.
+- **Stub down (502):** sign-in completes and the refresh token is stored, but
+  in 2 minutes the only requests are two `user_info` 502s. `/graphs` is never
+  requested.
 
-So: does a self-hosted deployment need a `user_info` implementation, and if so,
-what is the minimum response?
+## Not verified
 
-### What is already known (from source, not execution)
-
-Only `:UserGroups` is load-bearing, and every read is nil-safe:
-
-- `state/user-groups` → `(set (get-state [:user/info :UserGroups]))` (`src/main/frontend/state.cljs:792`)
-- `alpha-user?` / `beta-user?` → membership of `"alpha-tester"` / `"beta-tester"`
-- `src/main/frontend/components/settings.cljs:968` reads `:LemonStatus`, `:UserGroups`, `:LemonEndsAt`,
-  `:LemonRenewsAt`, all via `some->` / set-membership — a missing key renders as
-  the free plan, it does not throw
-- `src/main/frontend/components/header.cljs:541` reads `:UserGroups` only
-
-And the graph-fetch gate is satisfiable two independent ways
-(`src/main/frontend/handler/events/ui.cljs:460`, `src/main/frontend/handler/user.cljs:359`):
-
-```clojure
-fetch-graphs? (and (logged-in?) (or (= status :welcome)   ; alpha-or-beta-user?
-                                    (rtc-group?)))       ; true if sync-server-url is set
-```
-
-So the expectation — **to be confirmed, not assumed** — is that
-`{"UserGroups": []}` is enough, because `rtc-group?` is already true whenever a
-custom sync server URL is configured. `{"UserGroups": ["rtc_2025_07_10"]}` would
-satisfy the gate without relying on that, and is the safer stub.
-
-### The experiment
-
-Reuse the node that already exists — `examples/keycloak.nix` boots the realm,
-sync and publish, and `checks.sync`/`checks.publish` share it via the `stack`
-binding in `modules/checks.nix`. Add to it:
-
-1. **An nginx vhost with TLS**, serving the web app bundle *and* the stub, on one
-   origin. TLS because `<request-once` hardcodes the `https://` scheme, so a
-   plain-HTTP `apiDomain` is unreachable; one origin because that makes the
-   `user_info` POST same-origin and sidesteps CORS entirely. A self-signed cert
-   plus `--ignore-certificate-errors` on the browser is fine for a check.
-   ```nginx
-   location = /file-sync/user_info {
-     add_header Content-Type application/json;
-     return 200 '{"UserGroups":["rtc_2025_07_10"]}';
-   }
-   ```
-   If this turns out to be sufficient, **that nginx block is the whole fix** — no
-   new package, no new service. Aim for it before writing anything larger.
-1. **A web app built for this VM**: `logseq-webapp.override { clientConfig = { apiDomain = "<vhost>"; syncHttpBase = …; syncWsUrl = …; }; }`. Budget a full
-   cljs rebuild (~18 min) per config change, so get the config right in one go.
-1. **A seed page on the same origin** that plants the three tokens and navigates
-   to the app — this is what stands in for the sign-in button:
-   ```
-   location = /seed.html { ... localStorage.setItem('id-token', …) ×3,
-                               localStorage.setItem('sync-server-url', …),
-                               location = '/' ... }
-   ```
-   Tokens come from the realm by password grant, exactly as `checks.sync` already
-   does. Inject them into the page via a query string or a generated file.
-1. **Headless chromium**, pointed at `/seed.html`.
-
-**Observe from the server side, not the DOM.** If the app reaches logged-in
-state it calls the sync server with a bearer token, so the assertion is "an
-authenticated request arrived at `logseq-sync`" — no browser introspection, no
-scraping. Watch the service's journal, or assert on a request the sync server
-logs.
-
-### Acceptance
-
-- With the stub: an authenticated request from the browser reaches `logseq-sync`.
-- Without the stub (`user_info` returning 500): it does not. **Run this half
-  too** — it is what proves the stub is load-bearing rather than incidental, and
-  it is the cheap way to find out that the whole concern was misplaced.
-- Whatever the outcome, record it in `../../AGENTS.md`: this is currently the
-  single biggest unknown in the project and it should stop being one.
-
-### Known risks
-
-- The app may fail headless for reasons unrelated to identity (OPFS, wasm,
-  service worker). Establish that the bundle boots and reaches *anonymous*
-  working order in the VM **before** adding tokens, or a failure is unattributable.
-- `<request*` retries up to 5 times; a stub that 500s will take a while to give
-  up. Keep the negative case's timeout generous.
-- Chromium's closure is large. If the VM disk or build time becomes the problem,
-  `virtualisation.diskSize` is the first knob (the `containers` check already
-  sets it).
-
-## Phase 2 — generic OIDC sign-in
-
-Only worth starting once Phase 1 is green. The good news, and the reason this is
-smaller than "rewrite login": **all Cognito coupling sits behind one global with
-four members.**
-
-### The seam
-
-`packages/ui/src/ui.ts:212` does `window.LSAuth = amplifyAuth`, where
-`packages/ui/src/amplify/index.ts` exports exactly `{ init, Auth, LSAuthenticator }`.
-`src/main/frontend/components/user/login.cljs` is the only consumer — there is no
-separate mobile or desktop login component — and it uses:
-
-| Use | Site |
-| - | - |
-| `(.init js/LSAuth #js {:authCognito {…region, userPoolId, userPoolClientId, identityPoolId, oauthDomain}})` | `src/main/frontend/components/user/login.cljs:25` |
-| `(.-LSAuthenticator js/LSAuth)` as a React component | `src/main/frontend/components/user/login.cljs:27` |
-| `(.signOut js/LSAuth.Auth)` | `src/main/frontend/components/user/login.cljs:18` |
-
-`LSAuthenticator` takes props `{titleRender, onSessionCallback}` and a
-**render-prop child** receiving `op` with `.signOut` and `.sessionUser`
-(`src/main/frontend/components/user/login.cljs:66-71`). The session it must produce is the amplify shape, because
-`login-callback` (`src/main/frontend/handler/user.cljs`) destructures it:
-
-```clojure
-(:jwtToken (:idToken session))      ; sessionUser.signInUserSession.idToken.jwtToken
-(:jwtToken (:accessToken session))
-(:token (:refreshToken session))
-```
-
-### So the work is
-
-Write a drop-in `LSAuth` that performs Authorization Code + PKCE against any
-OIDC provider and returns a `signInUserSession`-shaped object. Everything
-downstream — `set-tokens!`, localStorage, refresh, the servers — is already
-provider-neutral and needs no change.
-
-Two details that make this cheaper than it looks:
-
-- **`auto-fill-refresh-token-from-cognito!` and `clear-cognito-tokens!`
-  (`src/main/frontend/handler/user.cljs:130-150`) degrade to no-ops.** They scan localStorage for
-  `CognitoIdentityServiceProvider.*` keys; with none present they do nothing. An
-  adapter that writes `refresh-token` itself needs no change there.
-- The cljs passes the config under the key `authCognito`. Either accept that key
-  name in the adapter (zero cljs changes) or substitute one line via the existing
-  `applyClientConfig` mechanism in `modules/packages/_common.nix`. **Prefer accepting the
-  key** — the point is to touch upstream sources as little as possible.
-
-### Acceptance
-
-A VM check in the shape of Phase 1's, minus the seed page: drive the real
-sign-in UI headless against the Keycloak realm, and assert an authenticated
-request reaches `logseq-sync`. That is the check that would let the README drop
-its "login is Cognito-only" caveat — do not drop it before then.
-
-## Phase 3 — fold into the packaging
-
-Only once Phases 1-2 are green:
-
-- `clientConfig` gains whatever the adapter needs, and loses what it no longer
-  does. `REGION` and `IDENTITY-POOL-ID` (`src/main/frontend/config.cljs:30-32`)
-  are Cognito-only and become dead — remove rather than add them.
-- `examples/keycloak.nix` grows the `user_info` location and the TLS vhost, so
-  the example stays a complete working deployment.
-- `examples/docker-compose.yml` and `modules/packages/images.nix`: if `user_info` ends
-  up needing more than an nginx `return`, it becomes a fourth image. If the
-  nginx block suffices, it belongs in the existing web app image and its config
-  — resist making a service out of one static response.
-- Rewrite "Setting the identity provider" in `../README.md` and "Identity
-  provider contract" in `../AGENTS.md` around what is then true.
+- **Desktop (Electron) and Android at runtime.** Same compiled code. The
+  differences are the origin (`lsp://logseq.com`, Capacitor's
+  `http://localhost`, both covered by `webOrigins: ["*"]`) and how the
+  verification link opens: Electron's `setWindowOpenHandler`
+  (`src/electron/electron/window.cljs`) sends https to the system browser, and
+  Capacitor opens external navigation there too. Read from source, not run.
+- **`logseq login` (the CLI).** It is auth-code + PKCE against
+  `/oauth2/authorize` with its own `CLI-COGNITO-CLIENT-ID`
+  (`src/main/logseq/cli/auth.cljs`), which `applyClientConfig` doesn't patch.
+  Untouched.
+- **Sign-out** clears the app's tokens but not the IdP's session cookie.
 
 ## Traps
 
-- **Do not cite `AWSCognitoIdentityProviderService.InitiateAuth`** as evidence of
-  the coupling. That call is in `login-with-username-password-e2e`
-  (`src/main/frontend/handler/user.cljs:285`), an `^:export`ed test helper, not the login path. The
-  amplify component is the real coupling. An earlier version of the docs got this
-  wrong.
-- **Do not add a runtime config path for sync/publish endpoints.** Upstream
-  already reads them from localStorage and exposes them in Settings; a second
-  mechanism is two things to keep in sync. `clientConfig` supplies defaults only.
-- **Do not assume a build success means anything here.** Everything in this
-  project that claims to work was runtime-probed, and the two findings that
-  mattered most this round (the runtime overrides, the `user_info` dependency)
-  came from reading the flow, not from a green build.
-- **`oauthDomain` sets only a host.** The refresh path is a hardcoded
-  `/oauth2/token`; Keycloak needs the rewrite in `examples/keycloak.nix`. Without
-  it sign-in appears to work and dies at the first refresh, about an hour later.
+- **The web app routes by fragment** (`frontend/core.cljs`: reitit
+  `:use-fragment`). The login page is `#/login`, not `/login`. On first start
+  the app also creates the Demo graph and routes home, so a test has to ask
+  for `#/login` again until it sticks.
+- **nginx picks the listen socket before `server_name`.** One vhost on
+  `127.0.0.1:443` and others on `0.0.0.0:443` means everything sent to
+  127.0.0.1 lands on the first, whatever its Host. The symptom was a 405 on
+  the `user_info` preflight.
+- **Keycloak 26's device page** has a relative form `action`, and after
+  `?user_code=` it goes straight to login, then a consent page, then "Device
+  Login Successful". Scripted form posts have to resolve the action and carry
+  every named input, not just the hidden ones.
+- **`oauthDomain` sets only a host**; the paths are hardcoded (`/oauth2/token`
+  for refresh, `/oauth2/device` for the patch). Without the token rewrite,
+  sign-in works and the first refresh fails.
+- **Don't add a runtime config path for sync/publish endpoints.** Upstream
+  already has one (localStorage + Settings).
+- **`nginx`'s `mime.types` has no `.mjs`.** It served the PDF viewer's module
+  script as `text/plain`, which browsers refuse. Found in `checks.login`'s
+  console output; fixed in the recipe.

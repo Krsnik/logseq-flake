@@ -12,8 +12,9 @@
 # files (journal-1, modules-2.lock, ...), which is what made a naive "tar up
 # ~/.gradle/caches" capture a real determinism risk instead of just an
 # implementation detail. `clientConfig` overrides are free now (no `hash`
-# argument, no fakeHash dance): `applyClientConfig` only patches .cljs
-# string literals, never build.gradle/AGP config, so the dependency set
+# argument, no fakeHash dance): `applyClientConfig` only patches web
+# sources (.cljs literals, the ui package's login form), never
+# build.gradle/AGP config, so the dependency set
 # (and thus android-deps.json's content and mitmCache's hash) is completely
 # independent of clientConfig — and the outer derivation is ordinary, so Nix
 # content-addresses its own output from the full input closure automatically.
