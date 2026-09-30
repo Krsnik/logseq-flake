@@ -98,8 +98,12 @@ generic build serves both.
 
 The provider side, as `examples/keycloak.nix` + `examples/logseq-realm.json` do
 it: the device grant enabled on a public client (`attributes`), CORS for the
-app origins (`webOrigins`), and the audience mapper and `cognito:username` claim
-(see `AGENTS.md`). Keycloak serves discovery with CORS itself, for any origin.
+app origins (`webOrigins`). No mappers: the user name falls back from
+`cognito:username` to the standard `preferred_username`, in the client
+(`self-hosting.patch`) and in the sync server (`db-sync.patch`). The realm's
+audience mapper only serves the checks, which authenticate with an access
+token; the clients send the id token, whose `aud` already is the client id.
+Keycloak serves discovery with CORS itself, for any origin.
 
 And `apiDomain` points at wherever the web app is served, because its nginx
 answers `POST /file-sync/user_info` with `{"UserGroups":["rtc_2025_07_10"]}`.

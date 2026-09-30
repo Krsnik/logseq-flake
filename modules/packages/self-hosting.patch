@@ -216,28 +216,49 @@
 +(def USER-POOL-ID (runtime-config "userPoolId" "us-east-1_dtagLnju8"))
  (def IDENTITY-POOL-ID "us-east-1:d6d3b034-1631-402b-b838-b44513e93ee0")
 -(def default-publish-api-base "https://logseq.io")
-+(def default-publish-api-base (runtime-config "publishApiBase" "https://logseq.io"))
++(def default-publish-api-base (runtime-config "publishUrl" "https://logseq.io"))
  
  ;; Enable for local development
  ;; (def default-publish-api-base "http://localhost:8787")
-@@ -41,12 +53,12 @@
- (defonce default-db-sync-ws-url
-   (if db-sync-local?
-     "ws://127.0.0.1:8787/sync/%s"
--    "wss://api.logseq.io/sync/%s"))
-+    (runtime-config "syncWsUrl" "wss://api.logseq.io/sync/%s")))
- 
+@@ -46,7 +58,7 @@
  (defonce default-db-sync-http-base
    (if db-sync-local?
      "http://127.0.0.1:8787"
 -    "https://api.logseq.io"))
-+    (runtime-config "syncHttpBase" "https://api.logseq.io")))
++    (runtime-config "syncUrl" "https://api.logseq.io")))
  
  (defn get-custom-sync-server-url
    "Read the user-configured custom sync server URL from localStorage.
+@@ -88,9 +100,10 @@
+ (defn db-sync-ws-url
+   "Return the WebSocket sync URL. Uses custom server when configured, otherwise the default."
+   []
+-  (if-let [custom (get-custom-sync-server-url)]
+-    (custom-url->ws-url custom)
+-    default-db-sync-ws-url))
++  ;; logseq-flake: always derived from the HTTP base, so the runtime config
++  ;; needs one sync key (syncUrl), not two that must agree. For upstream's
++  ;; own bases this is exactly default-db-sync-ws-url.
++  (custom-url->ws-url (or (get-custom-sync-server-url) default-db-sync-http-base)))
+ 
+ (defn db-sync-http-base
+   "Return the HTTP base URL for sync. Uses custom server when configured, otherwise the default."
 --- a/src/main/frontend/handler/user.cljs
 +++ b/src/main/frontend/handler/user.cljs
-@@ -167,6 +167,22 @@
+@@ -41,7 +41,11 @@
+           (#(base64/decodeString % true))
+           js/JSON.parse
+           (js->clj :keywordize-keys true)
+-          (update :cognito:username decode-username)))
++          ;; logseq-flake: the standard OIDC claim when the Cognito one is
++          ;; missing (any provider but Cognito); "" as before if neither is there.
++          (#(assoc % :cognito:username (if-let [u (:cognito:username %)]
++                                         (decode-username u)
++                                         (or (:preferred_username %) ""))))))
+ 
+ (defn- parse-jwt-safe
+   [jwt]
+@@ -167,6 +171,22 @@
       (set-token-to-localstorage! "" "" ""))
     (persist-auth-file!)))
  
@@ -260,7 +281,7 @@
  (defn- set-tokens!
    ([id-token access-token]
     (state/set-auth-id-token id-token)
-@@ -181,16 +197,23 @@
+@@ -181,16 +201,23 @@
     (state/set-auth-refresh-token refresh-token)
     (set-token-to-localstorage! id-token access-token refresh-token)
     (persist-auth-file!)
@@ -288,6 +309,18 @@
  
  (defn <refresh-id-token&access-token
    "Refresh id-token and access-token"
+--- a/src/main/frontend/worker/pipeline.cljs
++++ b/src/main/frontend/worker/pipeline.cljs
+@@ -398,7 +398,8 @@
+ (defn- gen-created-by-block
+   [decoded-id-token]
+   (let [user-uuid (:sub decoded-id-token)
+-        user-name (:cognito:username decoded-id-token)
++        ;; logseq-flake: the standard OIDC claim for non-Cognito providers.
++        user-name (or (:cognito:username decoded-id-token) (:preferred_username decoded-id-token))
+         email (:email decoded-id-token)
+         now (common-util/time-ms)]
+     {:block/uuid (uuid user-uuid)
 --- a/src/main/frontend/worker/sync/auth.cljs
 +++ b/src/main/frontend/worker/sync/auth.cljs
 @@ -38,9 +38,11 @@

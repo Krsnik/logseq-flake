@@ -141,13 +141,31 @@ let
           --persist-to "$SYNC_WORKER_DATA_DIR/state" \
           < /dev/null
 
+        # The worker builds its MCP metadata URLs from request.url, which
+        # behind a TLS proxy says http://127.0.0.1:<port>; MCP clients reject
+        # metadata whose resource isn't the URL they connected to. wrangler
+        # rewrites request.url to this origin instead.
+        public=()
+        url="''${SYNC_WORKER_PUBLIC_URL:-}"; url="''${url%/}"
+        if [ -n "$url" ]; then
+          public=(
+            --local-upstream "''${url#*://}"
+            --upstream-protocol "''${url%%://*}"
+          )
+        fi
+
         exec ${lib.getExe wrangler} dev \
           --config wrangler.toml \
           --ip "$SYNC_WORKER_IP" \
           --port "$SYNC_WORKER_PORT" \
           --persist-to "$SYNC_WORKER_DATA_DIR/state" \
+          "''${public[@]}" \
           "$@"
       '';
+
+      # Upstream fixes for non-Cognito providers: the user name from the
+      # standard OIDC claim, and a 401 on /mcp that starts MCP clients' OAuth.
+      patches = [ ./db-sync.patch ];
 
       preConfigure = setupSources {
         packageJsons = [
@@ -184,13 +202,16 @@ let
       installPhase = ''
         runHook preInstall
 
-        # Same reasoning as publish.nix: everything from [vars] on is deploy
-        # specific (Cognito pool, staging/prod environments); config arrives
-        # through the environment instead. The grep is there to fail the
-        # build loudly rather than silently ship upstream's pool if that
-        # block ever moves.
-        grep -q '^\[vars\]' deps/db-sync/worker/wrangler.toml
-        sed -i '/^\[vars\]/,$d' deps/db-sync/worker/wrangler.toml
+        # Same reasoning as publish.nix: [vars] (upstream's Cognito pool) and
+        # the [env.*] staging/prod sections are deploy specific; config
+        # arrives through the environment instead. Unlike publish.nix, what
+        # sits between them stays: the semantic API (and so MCP) answers 503
+        # without its [[ratelimits]] bindings. The greps fail the build
+        # loudly rather than silently ship upstream's pool if the layout moves.
+        toml=deps/db-sync/worker/wrangler.toml
+        sed -i -e '/^\[vars\]/,/^$/d' -e '/^\[env\./,$d' $toml
+        if grep 'COGNITO\|^\[env\.' $toml; then exit 1; fi
+        grep -q '^\[\[ratelimits\]\]' $toml
 
         mkdir -p $out/share/${finalAttrs.pname}
         cp -r deps/db-sync/worker $out/share/${finalAttrs.pname}/worker

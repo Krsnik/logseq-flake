@@ -47,9 +47,8 @@ inputs.logseq.packages.${system}.logseq.override {
     oidcIssuer = "https://id.example.org/realms/logseq";
     cognitoClientId = "logseq";
     apiDomain = "notes.example.org";
-    syncHttpBase = "https://sync.example.org";
-    syncWsUrl = "wss://sync.example.org/sync/%s";
-    publishApiBase = "https://blog.example.org";
+    syncUrl = "https://sync.example.org";
+    publishUrl = "https://blog.example.org";
   };
 }
 ```
@@ -59,8 +58,8 @@ inputs.logseq.packages.${system}.logseq.override {
 | `oidcIssuer`                 | `LOGSEQ_OIDC_ISSUER`                                   | Your OIDC provider; replaces Cognito login and refresh (see below)     |
 | `cognitoClientId`            | `LOGSEQ_OIDC_CLIENT_ID`                                | OAuth client id                                                        |
 | `apiDomain`                  | `LOGSEQ_API_DOMAIN`                                    | Host answering `/file-sync/user_info`; point it at your web app        |
-| `syncHttpBase` / `syncWsUrl` | `LOGSEQ_SYNC_HTTP_BASE` / `LOGSEQ_SYNC_WS_URL`         | Default sync server (`%s` is the graph id); users can still change it  |
-| `publishApiBase`             | `LOGSEQ_PUBLISH_API_BASE`                              | Default publish server, likewise                                       |
+| `syncUrl`                    | `LOGSEQ_SYNC_URL`                                      | Default sync server (`https://host`); users can still change it        |
+| `publishUrl`                 | `LOGSEQ_PUBLISH_URL`                                   | Default publish server, likewise                                       |
 | `oauthDomain`                | `LOGSEQ_COGNITO_OAUTH_DOMAIN`                          | Cognito hosted-login host (upstream's login only)                      |
 | `cognitoIdp` / `userPoolId`  | `LOGSEQ_COGNITO_IDP` / `LOGSEQ_COGNITO_USER_POOL_ID`   | Cognito API endpoint and user pool (upstream's login only)             |
 
@@ -107,6 +106,8 @@ One module per server/webapp target, `inputs.logseq.nixosModules.logseq-{webapp,
 | `oidcClientId`                                                  | sync, sync-worker, publish | Expected client id (required)                                                                                                  |
 | `oidcJwksUrl`                                                   | sync, sync-worker, publish | Signing-key endpoint (required)                                                                                                |
 | `r2AccountId`, `r2Bucket`, `r2AccessKeyId`, `r2SecretAccessKey` | sync-worker, publish       | R2 binding — placeholders are fine, both run on wrangler's local runtime with no real R2 to reach                              |
+| `dataDir`                                                       | sync, sync-worker, publish | Data directory (default `/var/lib/<serviceName>`); under `/var/lib`, nested paths included, systemd creates it for `user`   |
+| `publicUrl`                                                     | sync-worker                | The URL clients reach it at behind a reverse proxy (`SYNC_WORKER_PUBLIC_URL`); MCP clients need it                            |
 
 `services.logseq-webapp` runs its own dedicated nginx (there's no backend here to proxy to); the other three own a systemd unit each.
 `examples/keycloak.nix` shows all of these wired up against a self-hosted Keycloak realm.
@@ -156,8 +157,7 @@ For the web app that's runtime configuration, e.g. for the container image:
 LOGSEQ_OIDC_ISSUER=https://id.example.org/realms/logseq  # same value as the servers' oidcIssuer
 LOGSEQ_OIDC_CLIENT_ID=logseq                             # your provider's public client
 LOGSEQ_API_DOMAIN=notes.example.org                      # where the web app is served
-LOGSEQ_SYNC_HTTP_BASE=https://sync.example.org
-LOGSEQ_SYNC_WS_URL=wss://sync.example.org/sync/%s
+LOGSEQ_SYNC_URL=https://sync.example.org
 ```
 
 (desktop and Android: the same keys as a `clientConfig` override, see [Using the packages](#using-the-packages)).
@@ -167,8 +167,8 @@ The client reads every endpoint it needs from the provider's standard discovery 
 
 - a public client with the OAuth 2.0 device authorization grant enabled;
 - CORS allowed for your app's origins: the web app's own, `lsp://logseq.com` for desktop;
-- a scalar `aud` equal to the client id on the access token, and a `cognito:username` claim on the id token
-  (`examples/logseq-realm.json` has both mappers).
+- nothing else: the clients send the id token, whose `aud` is the client id, and take the user name from
+  `cognito:username` or else the standard `preferred_username`, both of which any provider puts there by default.
 
 And `apiDomain` has to answer `POST /file-sync/user_info` with `{"UserGroups":["rtc_2025_07_10"]}`.
 Without it the app signs in but never syncs.
@@ -177,6 +177,31 @@ The web app's image, NixOS module and `nix run` wrapper already serve exactly th
 Proven end to end for the web app by `checks.login`.
 Desktop and Android run the same code but haven't been exercised end to end yet.
 See `docs/self-hosted-identity.md` for how it works and what's left.
+
+### REST API and MCP
+
+`logseq-sync-worker` (not `logseq-sync`) also serves a REST API (docs at `/api-docs`, spec at `/openapi.json`)
+and an MCP server at `/mcp`. Their clients send an access token, so the provider additionally needs:
+
+- the access token's `aud` to be exactly the client id (Keycloak: an audience mapper, and no `roles` scope);
+- `logseq/read` and `logseq/write` in its `scope` (Keycloak: two client scopes, default on the client);
+- loopback redirect URIs on the client (`http://localhost:*`, `http://127.0.0.1:*`) for MCP clients to sign in with it.
+
+`examples/logseq-realm.json` has all of it. In Keycloak, declaring any client scope in a realm import stops it
+creating the built-in ones, so that realm declares `basic`, `profile` and `email` itself.
+Set the module's `publicUrl` when the worker sits behind a reverse proxy. Then, reusing the realm's public client:
+
+```sh
+claude mcp add --transport http --client-id logseq --callback-port 47111 logseq https://sync.example.org/mcp
+```
+
+```json
+{ "mcp": { "logseq": { "type": "remote", "url": "https://sync.example.org/mcp",
+                       "oauth": { "clientId": "logseq", "scope": "logseq/read logseq/write" } } } }
+```
+
+(the second is opencode's `opencode.json`; `opencode mcp auth logseq` signs in). `checks.sync-worker` runs both
+clients' sign-ins against the realm and calls the API directly and through MCP. It doesn't run the clients themselves.
 
 ## More detail
 

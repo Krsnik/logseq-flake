@@ -64,6 +64,28 @@
       Group = if cfg.group != null then cfg.group else cfg.user;
     };
 
+  # Where a server keeps its data. Under /var/lib (the usual case, nested
+  # paths included) systemd creates it and hands it to the service user via
+  # StateDirectory, which also orders the service after the mount holding it
+  # (systemd.exec(5)). Anywhere else it has to exist, writable by `user`, and
+  # the modules' explicit RequiresMountsFor does that ordering instead.
+  mkDataDirOption =
+    cfg:
+    lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/${cfg.serviceName}";
+      defaultText = lib.literalExpression ''"/var/lib/''${serviceName}"'';
+      example = "/var/lib/logseq/sync";
+      description = "Directory the server keeps its data in.";
+    };
+
+  mkDataDirServiceConfig =
+    cfg:
+    if lib.hasPrefix "/var/lib/" cfg.dataDir then
+      { StateDirectory = lib.removePrefix "/var/lib/" cfg.dataDir; }
+    else
+      { ReadWritePaths = [ cfg.dataDir ]; };
+
   # Shared by the two servers (sync, sync-worker, publish all read these —
   # sync-worker/publish additionally need R2, see mkR2Options). No default:
   # fails loudly if unset, matching examples/docker-compose.yml's existing

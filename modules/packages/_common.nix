@@ -184,9 +184,8 @@ let
     apiDomain = "api.logseq.com";
     cognitoIdp = "https://cognito-idp.us-east-1.amazonaws.com/";
     userPoolId = "us-east-1_dtagLnju8";
-    publishApiBase = "https://logseq.io";
-    syncWsUrl = "wss://api.logseq.io/sync/%s";
-    syncHttpBase = "https://api.logseq.io";
+    publishUrl = "https://logseq.io";
+    syncUrl = "https://api.logseq.io";
   };
 
   # The OCaml CLI keeps its own copies of some of those literals.
@@ -194,21 +193,29 @@ let
     "cli/lib/auth_state.ml" = [
       "oauthDomain"
       "cognitoClientId"
-      "syncHttpBase"
+      "syncUrl"
     ];
     "cli/lib/cli_config.ml" = [
       "syncWsUrl"
-      "syncHttpBase"
+      "syncUrl"
     ];
   };
 
   applyCliConfig =
     cfg:
+    let
+      # The CLI's websocket literal, derived from syncUrl the way the app's
+      # custom-url->ws-url does: https -> wss, plus /sync/%s.
+      withWsUrl =
+        c: c // { syncWsUrl = "ws" + lib.removePrefix "http" (lib.removeSuffix "/" c.syncUrl) + "/sync/%s"; };
+      from = withWsUrl defaultClientConfig;
+      to = withWsUrl cfg;
+    in
     lib.concatStrings (
       lib.mapAttrsToList (file: keys: ''
         substituteInPlace ${file} \
           ${lib.concatMapStringsSep " \\\n  " (
-            key: "--replace-fail '\"${defaultClientConfig.${key}}\"' '\"${cfg.${key}}\"'"
+            key: "--replace-fail '\"${from.${key}}\"' '\"${to.${key}}\"'"
           ) keys}
       '') cliClientConfigPatches
     );

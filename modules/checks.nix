@@ -125,14 +125,13 @@ in
             for key in ["id_token", "access_token", "refresh_token"]:
                 assert key in body, f"token response has no {key}: {sorted(body)}"
 
-            # Exactly the claims frontend/handler/user.cljs reads off the id token.
-            # `cognito:username` is a Cognito-shaped name that only exists here
-            # because logseq-realm.json maps it; Keycloak treats "." in a claim name
-            # as nesting but ":" as literal, which is what makes that possible.
+            # The claims the clients read off the id token. The user name is the
+            # standard preferred_username: the patches fall back to it when
+            # Cognito's cognito:username is missing, so no custom mapper.
             id_claims = claims(body["id_token"])
-            for claim in ["exp", "sub", "email", "cognito:username"]:
+            for claim in ["exp", "sub", "email", "preferred_username"]:
                 assert claim in id_claims, f"id_token is missing {claim}"
-            assert id_claims["cognito:username"] == "test", id_claims["cognito:username"]
+            assert id_claims["preferred_username"] == "test", id_claims["preferred_username"]
 
             # And the refresh grant the client actually sends, at the token
             # endpoint it reads from the realm's discovery document
@@ -153,7 +152,7 @@ in
             )
             for key in ["id_token", "access_token"]:
                 assert key in refreshed, f"refresh response has no {key}"
-            assert "cognito:username" in claims(refreshed["id_token"])
+            assert "preferred_username" in claims(refreshed["id_token"])
           '';
         };
 
@@ -226,8 +225,7 @@ in
                   oidcIssuer = "http://localhost:${toString keycloakPort}/realms/logseq";
                   cognitoClientId = "logseq";
                   apiDomain = "app.test";
-                  syncHttpBase = "https://sync.test";
-                  syncWsUrl = "wss://sync.test/sync/%s";
+                  syncUrl = "https://sync.test";
                 };
               };
 
@@ -390,7 +388,11 @@ in
         sync-worker = pkgs.testers.runNixOSTest {
           name = "logseq-sync-worker";
 
-          nodes.machine = stack;
+          nodes.machine = {
+            imports = [ stack ];
+            # As behind a TLS proxy: MCP clients check the metadata against this.
+            services.logseq-sync-worker.publicUrl = "https://sync.example.org";
+          };
 
           testScript = ''
             machine.wait_for_unit("keycloak.service")
@@ -414,8 +416,7 @@ in
             # And a token minted by the self-hosted IdP gets *past verify-jwt*
             # — proves the D1 migration step completed too, since the unit
             # wouldn't have reached "active" (wait_for_open_port above)
-            # otherwise. Deliberately not asserting 200/a graphs list here,
-            # unlike sync's equivalent check — see the comment below.
+            # otherwise.
             token = machine.succeed(
                 "curl -sSf -d grant_type=password -d client_id=logseq"
                 " -d username=test -d password=test"
@@ -425,27 +426,92 @@ in
             response = machine.succeed(
                 f"curl -s -H 'Authorization: Bearer {token}' http://localhost:${toString syncWorkerPort}/graphs"
             )
-            assert '"error":"unauthorized"' not in response, (
-                f"a realm-minted token was rejected: {response}"
-            )
-            # A real, understood upstream bug found here, not a packaging
-            # issue — documented in AGENTS.md/memory, not fixed (out of
-            # scope: patching upstream ClojureScript app logic, as opposed
-            # to the packaging-level source patches this project already
-            # does). deps/db-sync's <user-upsert!> (src/logseq/db_sync/
-            # index.cljs) runs on every authenticated request and passes
-            # `(aget claims "cognito:username")` straight to D1's .bind()
-            # with no nil-coercion — unlike the adjacent email-verified
-            # field, which does get coerced. The Node adapter never hits
-            # this: better-sqlite3 accepts an `undefined` bind leniently;
-            # D1 rejects it outright with D1_TYPE_ERROR. Keycloak, like
-            # real Cognito, only puts cognito:username on the id token, not
-            # the access token used here for Bearer auth (confirmed by
-            # decoding this exact token) — so this reproduces against a
-            # real Cognito pool too, not just a self-hosted realm.
-            assert '"debug-message":"D1_TYPE_ERROR' in response, (
-                f"expected the known cognito:username/D1 upstream bug (see comment), got: {response}"
-            )
+            # A graphs list, not an error. This token has no cognito:username
+            # (Keycloak puts that nowhere by default), and upstream's
+            # <user-upsert!> bound the missing claim straight into D1, which
+            # rejects `undefined` (D1_TYPE_ERROR). db-sync.patch falls back to
+            # the standard preferred_username, as presence.cljs already did.
+            assert '"graphs"' in response, f"a realm-minted token was refused: {response}"
+
+            # MCP, as Claude Code and opencode connect to it. Without a token a
+            # 401, upon which they read the protected-resource metadata under
+            # /.well-known of the URL they connected to. Its resource has to be
+            # that URL, so the public one, not the listen address.
+            import base64
+            import hashlib
+            import html
+            import json
+            import re
+            import shlex
+            from urllib.parse import parse_qs, urlencode, urlparse
+
+            worker = "http://localhost:${toString syncWorkerPort}"
+            realm = "http://localhost:${toString keycloakPort}/realms/logseq"
+            mcp = f"-H 'content-type: application/json' -H 'accept: application/json, text/event-stream' {worker}/mcp"
+            headers = machine.succeed(f"curl -s -D - -o /dev/null -d '{{}}' {mcp}")
+            assert headers.startswith("HTTP/1.1 401") and "WWW-Authenticate: Bearer" in headers, headers
+            metadata = json.loads(machine.succeed(f"curl -sf {worker}/.well-known/oauth-protected-resource/mcp"))
+            assert metadata["resource"] == "https://sync.example.org/mcp", metadata
+            assert metadata["authorization_servers"] == [realm], metadata
+
+            def claims(jwt):
+                payload = jwt.split(".")[1]
+                return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+
+            # Both sign in with the realm's own public client, pre-registered
+            # (--client-id / oauth.clientId), by authorization code + PKCE, on a
+            # loopback redirect: Claude Code's on localhost, opencode's default.
+            def sign_in(redirect_uri):
+                verifier = "v" * 64
+                challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+                query = urlencode({
+                    "client_id": "logseq",
+                    "response_type": "code",
+                    "redirect_uri": redirect_uri,
+                    "scope": " ".join(metadata["scopes_supported"]),
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                    "state": "state",
+                    "resource": metadata["resource"],
+                })
+                machine.succeed("rm -f /tmp/kc")
+                page = machine.succeed(f"curl -sf -c /tmp/kc -b /tmp/kc '{realm}/protocol/openid-connect/auth?{query}'")
+                form = re.search(r'action="([^"]+)"', page)
+                assert form, page
+                location = machine.succeed(
+                    f"curl -s -c /tmp/kc -b /tmp/kc -o /dev/null -w '%{{redirect_url}}'"
+                    f" -d username=test -d password=test {shlex.quote(html.unescape(form[1]))}"
+                )
+                assert location.startswith(redirect_uri + "?"), location
+                code = parse_qs(urlparse(location).query)["code"][0]
+                tokens = json.loads(machine.succeed(
+                    f"curl -sf -d grant_type=authorization_code -d client_id=logseq -d code={code}"
+                    f" -d code_verifier={verifier} --data-urlencode redirect_uri={shlex.quote(redirect_uri)}"
+                    f" {realm}/protocol/openid-connect/token"
+                ))
+                return tokens["access_token"]
+
+            for redirect_uri in ["http://localhost:47111/callback", "http://127.0.0.1:19876/mcp/oauth/callback"]:
+                token = sign_in(redirect_uri)
+                access = claims(token)
+                assert access["aud"] == "logseq", access
+                assert {"logseq/read", "logseq/write"} <= set(access["scope"].split()), access["scope"]
+                auth = f"-H 'Authorization: Bearer {token}'"
+
+                # The semantic REST API: past the scope check and the rate limiters.
+                response = machine.succeed(f"curl -s -w ' %{{http_code}}' {auth} {worker}/api/v1/graphs")
+                assert response.endswith(" 200") and '"graphs"' in response, response
+
+                # And through MCP: a tool call runs code that calls that API.
+                call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                    "name": "execute",
+                    "arguments": {"code": 'async () => await codemode.request({ method: "GET", path: "/api/v1/graphs" })'},
+                }})
+                events = machine.succeed(f"curl -sf {auth} -d {shlex.quote(call)} {mcp}")
+                data = [json.loads(line[6:]) for line in events.splitlines() if line.startswith("data: ")]
+                assert data, events
+                result = data[0]["result"]
+                assert not result.get("isError") and "graphs" in result["content"][0]["text"], result
           '';
         };
 
@@ -458,13 +524,27 @@ in
         publish = pkgs.testers.runNixOSTest {
           name = "logseq-publish";
 
-          nodes.machine = stack;
+          nodes.machine = {
+            imports = [ stack ];
+            # A fixed user and a nested dataDir: StateDirectory creates it,
+            # parents included, owned by that user.
+            users.users.logseq = {
+              isSystemUser = true;
+              group = "logseq";
+            };
+            users.groups.logseq = { };
+            services.logseq-publish = {
+              user = "logseq";
+              dataDir = "/var/lib/logseq/publish";
+            };
+          };
 
           testScript = ''
             machine.wait_for_unit("keycloak.service")
             machine.wait_for_open_port(${toString keycloakPort})
             machine.wait_for_unit("logseq-publish.service")
             machine.wait_for_open_port(${toString publishPort})
+            machine.succeed("[ $(stat -c %U /var/lib/logseq/publish) = logseq ]")
 
             # Serving, and rendering: the home page comes out of render.cljs and the
             # static assets out of resources shadow-cljs inlined into the bundle.
@@ -647,7 +727,7 @@ in
 
               grep -q '${endpoints.apiDomain}' "$app/share/logseq/js/main.js"
               grep -q '^window.LOGSEQ_CONFIG = ' "$app/share/logseq/js/logseq-config.js"
-              grep -q '${endpoints.syncHttpBase}' "$app/share/logseq/logseq-cli.js"
+              grep -q '${endpoints.syncUrl}' "$app/share/logseq/logseq-cli.js"
 
               touch $out
             '';

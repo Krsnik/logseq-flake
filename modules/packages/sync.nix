@@ -54,6 +54,10 @@ let
         python3
       ];
 
+      # Upstream fixes for non-Cognito providers: the user name from the
+      # standard OIDC claim, and a 401 on /mcp that starts MCP clients' OAuth.
+      patches = [ ./db-sync.patch ];
+
       preConfigure = setupSources {
         packageJsons = [
           "package.json"

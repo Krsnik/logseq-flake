@@ -91,6 +91,12 @@
     # its default scopes so nothing else lands in `aud`. One audience left,
     # which Keycloak serialises as a scalar: "aud": "logseq".
     #
+    # The sync worker's REST API and MCP server also want `logseq/read` and
+    # `logseq/write` in the access token's `scope`, so the realm declares
+    # them as client scopes. Declaring any stops Keycloak from creating its
+    # built-in ones, hence `basic`/`profile`/`email` alongside, carrying
+    # only the claims Logseq reads.
+    #
     # The test user also needs firstName/lastName: without them Keycloak's
     # VERIFY_PROFILE required action blocks every login with
     # "Account is not fully set up".

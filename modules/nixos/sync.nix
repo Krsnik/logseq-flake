@@ -24,6 +24,7 @@
         })
         // common.oidcOptions
         // {
+          dataDir = common.mkDataDirOption cfg;
           package = lib.mkOption {
             type = lib.types.package;
             defaultText = "inputs.logseq.packages.\${system}.logseq-sync";
@@ -44,12 +45,13 @@
             COGNITO_CLIENT_ID = cfg.oidcClientId;
             COGNITO_JWKS_URL = cfg.oidcJwksUrl;
             DB_SYNC_PORT = toString cfg.port;
-            DB_SYNC_DATA_DIR = "/var/lib/${cfg.serviceName}";
+            DB_SYNC_DATA_DIR = cfg.dataDir;
           };
 
-          serviceConfig = common.mkUserServiceConfig cfg // {
+          unitConfig.RequiresMountsFor = [ cfg.dataDir ];
+
+          serviceConfig = common.mkUserServiceConfig cfg // common.mkDataDirServiceConfig cfg // {
             ExecStart = lib.getExe cfg.package;
-            StateDirectory = cfg.serviceName;
             Restart = "on-failure";
           };
         };

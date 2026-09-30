@@ -9,7 +9,7 @@ identity provider (self-hosted Keycloak) and sync/publish endpoints
 configurable at build time, so none of it is hardwired to upstream's
 Cognito pool or `logseq.io`/`logseq.com`.
 
-## Current state (2026-09-28)
+## Current state (2026-09-29)
 
 All work lives in `./logseq-flake/`, a standalone flake. Its `nixpkgs`/
 `flake-parts`/`import-tree` inputs are the tooling; the pinned Logseq source
@@ -24,14 +24,14 @@ by a check in `./logseq-flake/modules/checks.nix` (`nix flake check`):
 
 |Check|What it proves|
 |-|-|
-|`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`cognito:username`, the realm's discovery document advertises a device endpoint, and the refresh grant works at the `token_endpoint` it names (both what the patched client relies on)|
+|`sync`|VM: Keycloak realm + sync server. `/health` public, `/graphs` 401 without a token and **200 with one the local realm minted** — the self-hosted-IdP claim, proven. Also asserts the *client* side of the same realm's contract: the id token carries `exp`/`sub`/`email`/`preferred_username` (no `cognito:username` mapper: both patches fall back to it), the realm's discovery document advertises a device endpoint, and the refresh grant works at the `token_endpoint` it names (both what the patched client relies on)|
 |`login`|VM, same realm: the **stock** web app package, given `oidcIssuer` and endpoints only at runtime (`services.logseq-webapp.clientConfig`), signs in **through its own UI** in headless Chromium (driven over the DevTools protocol by a 10-line node script). It reads the realm's discovery document and starts the device flow cross-origin, completes Keycloak's device/login/consent pages, **refreshes at the discovered token endpoint** (asserted from Keycloak's own `REFRESH_TOKEN` events), and then the sync server receives an **authenticated `GET /graphs`** (200), which only happens once the `user_info` stub returned a map. Also asserts the stub's CORS preflight|
 |`webapp`|VM: nginx serves the bundle, the app entry point loads|
 |`desktop`|Launcher executable, bundled CLI runs, `StartupWMClass` matches the wrapper's `--class`, the app ships its baked `js/logseq-config.js` (next to upstream's fallbacks in `main.js`) and the OCaml CLI its substituted literals|
-|`publish`|VM: the same node as `sync`. The worker runs outside Cloudflare at all (its Durable Object + R2 bindings come from wrangler's local runtime), serves its rendered home page and inlined static assets, `DELETE /pages/:g/:p` is 401 without a token and **404 with one the local realm minted** — past `verify-jwt`, having fetched the realm's JWKS from inside workerd|
+|`publish`|VM: the same node as `sync`, but with the deployment shape the production host uses: a fixed `user` and a nested `dataDir` (`/var/lib/logseq/publish`), which systemd creates owned by that user. The worker runs outside Cloudflare at all (its Durable Object + R2 bindings come from wrangler's local runtime), serves its rendered home page and inlined static assets, `DELETE /pages/:g/:p` is 401 without a token and **404 with one the local realm minted** — past `verify-jwt`, having fetched the realm's JWKS from inside workerd|
 |`android`|The APK is a real APK and its web assets carry the baked `js/logseq-config.js` and upstream's fallbacks|
 |`containers`|VM running podman: the generic web app image serves unprivileged under `cap_drop=ALL`, `js/sqlite3.wasm` comes back as `application/wasm`, `/login` falls back to `index.html`, and `LOGSEQ_*` variables given to the container come back in its `js/logseq-config.js`|
-|`sync-worker`|VM, same realm as `sync`/`publish`: `/health` public, `/graphs` 401 without a token, `/openapi.json` proves the semantic-REST build step actually produced something, a realm-minted token gets past `verify-jwt` (then hits the documented D1/`cognito:username` upstream bug — asserted explicitly, not silently)|
+|`sync-worker`|VM, same realm as `sync`/`publish`: `/health` public, `/graphs` 401 without a token, `/openapi.json` proves the semantic-REST build step actually produced something, a realm-minted token gets a graphs list (past `verify-jwt` and the D1 user upsert `db-sync.patch` fixes). MCP as Claude Code and opencode use it: `/mcp` 401 without a token, the protected-resource metadata at `publicUrl`, auth code + PKCE on both clients' loopback redirects, then with that access token the semantic REST API (scopes, rate limiters) and an MCP `execute` tool call both return the graphs list|
 |`webapp-service`|VM: `services.logseq-webapp`'s own dedicated nginx process serves the bundle, `application/wasm` for `sqlite3.wasm`, `text/javascript` for `pdf.mjs`, `/login` falls back to `index.html` — the module wiring, not just the package (that's `webapp`, above)|
 |`desktop-module`|Eval-only (no port to knock on, no VM): a throwaway `nixosSystem` with `programs.logseq.enable = true` actually lands `packages.logseq` in `environment.systemPackages` — `nix flake check`'s own module type-check proves the module evaluates, this proves `enable` does something|
 
@@ -155,8 +155,8 @@ Storage is D1 + Durable Object + R2, not the SQLite/filesystem
 frontends onto one dataset (confirmed against the third-party
 `logseq-selfhost` project's own README, which packages both the exact same
 way this flake does, and says so explicitly). Production
-(`./modules/system/hosts/server/hypervisor/services/logseq.nix`,
-reference-only) runs this variant, not the plain Node adapter.
+(`./modules/system/hosts/server/hypervisor/services/logseq.nix` in the
+parent configuration) runs this variant, not the plain Node adapter.
 
 Structurally this is much closer to `packages.logseq-publish` (wrangler's
 local runtime, same `CLOUDFLARE_INCLUDE_PROCESS_ENV=true`/`[vars]`-stripping
@@ -173,6 +173,31 @@ just that one command (verified: wrangler's own source, `is-interactive.ts`/
 radius — it also reformats `wrangler dev`'s own output and disables its
 interactive hotkeys, which the migration-prompt fix has no business
 touching).
+
+**REST API and MCP.** Three things had to change for them to answer with
+data rather than errors, all proven by `checks.sync-worker`:
+
+1. The `wrangler.toml` strip keeps the `[[ratelimits]]` bindings between
+   `[vars]` and `[env.*]` — without them every semantic call is a 503
+   ("rate limiter unavailable"). wrangler provides them locally.
+1. `db-sync.patch` answers `/mcp` without a token with a bare
+   `WWW-Authenticate: Bearer` 401; upstream serves `initialize`/`tools/list`
+   anonymously, so MCP clients never start OAuth. No `resource_metadata` URL
+   in that header: wrangler rewrites an absolute URL in a response *header*
+   back to its listen address (not in a body), and clients fall back to
+   `/.well-known/oauth-protected-resource/mcp` on the URL they connected to.
+1. That metadata's `resource` comes from `request.url`, which behind a TLS
+   proxy is the listen address; MCP clients reject a mismatch. The launcher
+   passes `SYNC_WORKER_PUBLIC_URL` (module `publicUrl`) to `wrangler dev
+   --local-upstream`/`--upstream-protocol`, which rewrites `request.url`.
+
+The realm side (scopes, audience) is in the README's "REST API and MCP" and
+`examples/keycloak.nix`. MCP clients reuse the realm's public `logseq`
+client (Claude Code `--client-id`, opencode `oauth.clientId`), so `aud`
+stays `logseq` without `COGNITO_CLIENT_IDS`. Not run: the real Claude Code
+and opencode binaries (the check replays their OAuth requests), and dynamic
+client registration (Keycloak's anonymous-registration policies would need
+configuring, and a registered client's `aud` would differ).
 
 ### Android app (`packages.logseq-android`)
 
@@ -393,8 +418,11 @@ that name), `port`, `openFirewall`, and `user`/`group` (default `null` →
 this repo's `woodpecker-server.nix` precedent that `DynamicUser`'s
 allocated UID doesn't survive reboot on an impermanent-root host). The
 three servers additionally get `oidcIssuer`/`oidcClientId`/`oidcJwksUrl`
-(no default — fails loudly if unset) and, for sync-worker/publish, four R2
-placeholder options. `services.logseq-webapp` bundles its own dedicated
+(no default — fails loudly if unset), `dataDir` (default `/var/lib/<serviceName>`; under `/var/lib`, nested paths included, it becomes `StateDirectory`,
+which systemd creates for `user` and orders after the mount holding it;
+elsewhere `ReadWritePaths` plus an explicit `RequiresMountsFor`) and, for
+sync-worker/publish, four R2 placeholder options; sync-worker also has
+`publicUrl` (see "REST API and MCP" above). `services.logseq-webapp` bundles its own dedicated
 nginx process (reusing `_webapp-nginx.nix` verbatim — same recipe the
 container image and `nix run` wrapper use) rather than leaving that to the
 consumer, the one deliberate exception to how every other service in this
@@ -435,21 +463,17 @@ under `pkgs.testers.runNixOSTest` (not just evaluated):
    consumers (container, `nix run`, this module) after the fix, not just
    the one that was failing.
 
-One real, **upstream** bug found and *not* fixed (deliberately — see
-"Boundaries" below): `deps/db-sync/src/logseq/db_sync/index.cljs`'s
-`<user-upsert!`, called on every authenticated request, passes
-`(aget claims "cognito:username")` straight into a D1 `.bind()` call with
-no `nil` coercion (unlike the adjacent `email-verified` field, which does
-get coerced). The Node adapter never hits this — better-sqlite3 accepts an
-`undefined` bind parameter leniently — but Cloudflare D1 rejects it outright
-with `D1_TYPE_ERROR: Type 'undefined' not supported`. Keycloak, like real
-Cognito, puts `cognito:username` on the id token but not the access token
-used for Bearer auth (confirmed by decoding the actual token in the
-`sync-worker` check) — so this reproduces against a real Cognito pool too,
-not just a self-hosted realm. `checks.sync-worker` asserts this exact,
-understood failure explicitly (not a silent 401, not a fake 200) so a
-change either way — upstream fixing it, or a regression making it worse —
-fails loudly rather than rotting unnoticed.
+One real **upstream** bug found, now fixed by `modules/packages/db-sync.patch`
+(both sync targets): `deps/db-sync/src/logseq/db_sync/index.cljs`'s
+`<user-upsert!`, called on every authenticated request, bound
+`(aget claims "cognito:username")` straight into a D1 `.bind()`. Any
+provider but Cognito omits that claim, and D1, unlike better-sqlite3 (the
+Node adapter), rejects `undefined` with `D1_TYPE_ERROR: Type 'undefined' not
+supported`. The patch falls back to the standard `preferred_username`, as
+upstream's own `presence.cljs` already does; `self-hosting.patch` does the
+same in the client's `parse-jwt`, so no provider needs a `cognito:username`
+mapper, and Cognito, which sends it, is unaffected. `checks.sync-worker`
+asserts the graphs list.
 
 ## Identity provider contract
 
@@ -504,8 +528,10 @@ they need no rebuild and are per-user: `sync-server-url` (overrides
 `db-sync-http-base` and, derived from it via `https`→`wss`, `db-sync-ws-url`
 — also flips `rtc-group?`, clearing the alpha/beta gate on fetching remote
 graphs) and `publish-server-url` (the publish API base). So `clientConfig`'s
-`syncHttpBase`/`syncWsUrl`/`publishApiBase` are compiled-in *defaults* for a
-preconfigured build, not the only lever. The identity keys
+`syncUrl`/`publishUrl` are *defaults* for a preconfigured deployment
+(`syncUrl` takes the same form as that Settings field, and the patch derives
+the websocket URL from it the same way, so there is no `%s` to get wrong),
+not the only lever. The identity keys
 (`oidcIssuer`, `cognitoClientId`, `oauthDomain`, `apiDomain`, `cognitoIdp`,
 `userPoolId`) have no per-user equivalent; they're per deployment (`LOGSEQ_*`
 for the web app, baked for desktop and Android).
@@ -516,7 +542,7 @@ Keycloak-local password. Identity brokering lets Keycloak delegate login to
 another OIDC provider (e.g. a self-hosted GitLab or Forgejo/Gitea, both of
 which expose `/.well-known/openid-configuration` for their own OAuth
 applications) and mint its own token afterwards, so the contract above
-(audience mapper, `cognito:username`) is unchanged — only
+is unchanged — only
 who the user types their password into moves. Register an OAuth application
 on the GitLab/Forgejo side (redirect URI
 `<keycloak-issuer>/broker/<alias>/endpoint`), then add to the realm export:
@@ -575,21 +601,29 @@ makes them "remove", not "add". The `https://api.logseq.com/logseq/version`
 update-check ping is the one live upstream call left. It's cosmetic, and cheap
 to route through the runtime config if anyone cares.
 
+### 3. `apiDomain` is still a bare host
+
+Sync and publish are full URLs (`LOGSEQ_SYNC_URL`, `LOGSEQ_PUBLISH_URL`;
+renamed from `syncHttpBase`/`syncWsUrl`/`publishApiBase`, the websocket URL
+now derived in the patch's `db-sync-ws-url` and, for the CLI, in
+`applyCliConfig`). `apiDomain` isn't: upstream prepends `"https://"` at its
+two call sites (`frontend/handler/user.cljs:397`, `:424`), which is also why
+`checks.login` needs TLS for `app.test`. Proposed, not done: an `apiUrl` key
+(`LOGSEQ_API_URL`), patching those two sites.
+
 ## Boundaries (intentionally not touched)
 
 - The live production deployment
-  (`./modules/system/hosts/server/hypervisor/services/logseq.nix` — podman
-  `oci-containers` running `ghcr.io/yshalsager/logseq-selfhost-*` images,
-  domains `notes.krsnik.at`/`sync.notes.krsnik.at`/`blog.krsnik.at`) is
-  **not** touched by any of this work and shouldn't be, without being
-  asked explicitly — it's a running service with real data.
+  (`./modules/system/hosts/server/hypervisor/services/logseq.nix` in the
+  parent configuration, domains `notes.krsnik.at`/`sync.notes.krsnik.at`/
+  `blog.krsnik.at`, plus its Keycloak in `keycloak.nix` beside it) is a
+  running service with real data. On 2026-09-29, when asked, it was rewritten
+  from the third-party `logseq-selfhost` containers to this flake's modules
+  (web app, sync worker, publish, all against its Keycloak), uncommitted for
+  the owner to review and deploy. Never commit or deploy there; change it
+  only when asked.
 - NixOS service modules (`services.logseq-{webapp,sync,sync-worker,publish}`)
-  are done — see "NixOS service modules" above. Not fixed, deliberately: the
-  real upstream D1/`cognito:username` bug that same section documents.
-  Patching upstream ClojureScript app logic is a different, bigger
-  commitment than the source-literal/config patches this project already
-  does (`applyClientConfig`, the `wrangler.toml` `[vars]` strip) — out of
-  scope unless asked for explicitly.
+  are done — see "NixOS service modules" above.
 - The desktop client's home-manager module (`programs.logseq` — see
   "Desktop client" above) has no permanent `nix flake check` entry, unlike
   its NixOS counterpart. Verified for real all the same (see that section),

@@ -29,6 +29,17 @@
         // common.oidcOptions
         // (common.mkR2Options "logseq-sync-worker-local")
         // {
+          publicUrl = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            example = "https://sync.example.org";
+            description = ''
+              The URL clients reach the worker at, when that isn't its own
+              listen address (a TLS reverse proxy). MCP clients need it:
+              the OAuth metadata they check is built from it.
+            '';
+          };
+          dataDir = common.mkDataDirOption cfg;
           package = lib.mkOption {
             type = lib.types.package;
             defaultText = "inputs.logseq.packages.\${system}.logseq-sync-worker";
@@ -49,16 +60,18 @@
             COGNITO_CLIENT_ID = cfg.oidcClientId;
             COGNITO_JWKS_URL = cfg.oidcJwksUrl;
             SYNC_WORKER_PORT = toString cfg.port;
-            SYNC_WORKER_DATA_DIR = "/var/lib/${cfg.serviceName}";
+            SYNC_WORKER_DATA_DIR = cfg.dataDir;
             R2_ACCOUNT_ID = cfg.r2AccountId;
             R2_BUCKET = cfg.r2Bucket;
             R2_ACCESS_KEY_ID = cfg.r2AccessKeyId;
             R2_SECRET_ACCESS_KEY = cfg.r2SecretAccessKey;
+            SYNC_WORKER_PUBLIC_URL = lib.mkIf (cfg.publicUrl != null) cfg.publicUrl;
           };
 
-          serviceConfig = common.mkUserServiceConfig cfg // {
+          unitConfig.RequiresMountsFor = [ cfg.dataDir ];
+
+          serviceConfig = common.mkUserServiceConfig cfg // common.mkDataDirServiceConfig cfg // {
             ExecStart = lib.getExe cfg.package;
-            StateDirectory = cfg.serviceName;
             Restart = "on-failure";
           };
         };

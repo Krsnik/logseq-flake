@@ -1,7 +1,6 @@
 {
   "realm": "logseq",
   "enabled": true,
-
   "clients": [
     {
       "clientId": "logseq",
@@ -9,11 +8,24 @@
       "publicClient": true,
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
-      "redirectUris": ["http://localhost:*", "logseq://*"],
-      "webOrigins": ["*"],
-      "attributes": { "oauth2.device.authorization.grant.enabled": "true" },
-
-      "defaultClientScopes": ["basic", "acr", "profile", "email", "web-origins"],
+      "redirectUris": [
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "logseq://*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "logseq/read",
+        "logseq/write"
+      ],
       "protocolMappers": [
         {
           "name": "logseq-audience",
@@ -24,25 +36,103 @@
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
-        },
-        {
-          "name": "logseq-username",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-property-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "username",
-            "claim.name": "cognito:username",
-            "jsonType.label": "String",
-            "id.token.claim": "true",
-            "access.token.claim": "false",
-            "userinfo.token.claim": "true"
-          }
         }
       ]
     }
   ],
-
+  "clientScopes": [
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "profile",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "email",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "email",
+            "claim.name": "email",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "email verified",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "config": {
+            "user.attribute": "emailVerified",
+            "claim.name": "email_verified",
+            "jsonType.label": "boolean",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "logseq/read",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "logseq/write",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": []
+    }
+  ],
   "users": [
     {
       "username": "test",
@@ -52,7 +142,13 @@
       "firstName": "Test",
       "lastName": "User",
       "requiredActions": [],
-      "credentials": [{ "type": "password", "value": "test", "temporary": false }]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "test",
+          "temporary": false
+        }
+      ]
     }
   ]
 }

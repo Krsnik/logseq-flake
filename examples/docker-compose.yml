@@ -8,36 +8,25 @@
 #   nix build path:.#logseq-sync-image    && podman load -i result
 #   nix build path:.#logseq-publish-image && podman load -i result
 #
-# Then fill in these (a .env file beside this one works) and
-# `docker compose up -d`. They have no defaults on purpose: falling back to
-# upstream's Cognito pool and api.logseq.io is exactly what this packaging
-# exists to avoid, so compose fails loudly instead.
-#
-#   LOGSEQ_OIDC_ISSUER=https://idp.example.org/realms/logseq
-#   LOGSEQ_OIDC_CLIENT_ID=logseq
-#   LOGSEQ_OIDC_JWKS_URL=https://idp.example.org/realms/logseq/protocol/openid-connect/certs
-#   LOGSEQ_API_DOMAIN=notes.example.org
-#   LOGSEQ_SYNC_HTTP_BASE=https://sync.example.org
-#   LOGSEQ_SYNC_WS_URL=wss://sync.example.org/sync/%s
-#   LOGSEQ_PUBLISH_API_BASE=https://blog.example.org
+# Then `cp .env.example .env`, fill it in and `docker compose up -d`. The
+# variables have no defaults on purpose: falling back to upstream's Cognito
+# pool and api.logseq.io is exactly what this packaging exists to avoid, so
+# compose fails loudly instead.
 #
 # Any OIDC provider that offers the device flow works, for the servers and the
 # web app's sign-in alike — ./keycloak.nix is a worked Keycloak realm, and
-# checks.sync/checks.login prove it end to end. LOGSEQ_API_DOMAIN is where the
-# web app itself is reachable: it answers the client's user_info call. The
-# full list of what the web app reads is ../modules/packages/_client-config.nix.
+# checks.sync/checks.login prove it end to end.
 services:
   webapp:
     image: localhost/logseq-webapp:latest
     ports:
-      - "8080:8080"
+      - 8080:8080
     environment:
       LOGSEQ_OIDC_ISSUER: ${LOGSEQ_OIDC_ISSUER:?set LOGSEQ_OIDC_ISSUER}
       LOGSEQ_OIDC_CLIENT_ID: ${LOGSEQ_OIDC_CLIENT_ID:?set LOGSEQ_OIDC_CLIENT_ID}
       LOGSEQ_API_DOMAIN: ${LOGSEQ_API_DOMAIN:?set LOGSEQ_API_DOMAIN}
-      LOGSEQ_SYNC_HTTP_BASE: ${LOGSEQ_SYNC_HTTP_BASE:?set LOGSEQ_SYNC_HTTP_BASE}
-      LOGSEQ_SYNC_WS_URL: ${LOGSEQ_SYNC_WS_URL:?set LOGSEQ_SYNC_WS_URL}
-      LOGSEQ_PUBLISH_API_BASE: ${LOGSEQ_PUBLISH_API_BASE:?set LOGSEQ_PUBLISH_API_BASE}
+      LOGSEQ_SYNC_URL: ${LOGSEQ_SYNC_URL:?set LOGSEQ_SYNC_URL}
+      LOGSEQ_PUBLISH_URL: ${LOGSEQ_PUBLISH_URL:?set LOGSEQ_PUBLISH_URL}
     # nginx forks its workers with setuid, which cap_drop: ALL removes, so this
     # container starts unprivileged rather than dropping privileges itself.
     user: "65534:65534"
@@ -49,7 +38,7 @@ services:
   sync:
     image: localhost/logseq-sync:latest
     ports:
-      - "8081:8080"
+      - 8081:8080
     environment:
       COGNITO_ISSUER: ${LOGSEQ_OIDC_ISSUER:?set LOGSEQ_OIDC_ISSUER}
       COGNITO_CLIENT_ID: ${LOGSEQ_OIDC_CLIENT_ID:?set LOGSEQ_OIDC_CLIENT_ID}
@@ -62,7 +51,7 @@ services:
   publish:
     image: localhost/logseq-publish:latest
     ports:
-      - "8082:8787"
+      - 8082:8787
     environment:
       COGNITO_ISSUER: ${LOGSEQ_OIDC_ISSUER:?set LOGSEQ_OIDC_ISSUER}
       COGNITO_CLIENT_ID: ${LOGSEQ_OIDC_CLIENT_ID:?set LOGSEQ_OIDC_CLIENT_ID}

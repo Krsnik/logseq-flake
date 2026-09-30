@@ -1,0 +1,30 @@
+--- a/deps/db-sync/src/logseq/db_sync/index.cljs
++++ b/deps/db-sync/src/logseq/db_sync/index.cljs
+@@ -401,7 +401,9 @@
+     (when (string? user-id)
+       (let [email (aget claims "email")
+             email-verified (aget claims "email_verified")
+-            username (aget claims "cognito:username")
++            ;; logseq-flake: the standard OIDC claim for non-Cognito providers,
++            ;; as presence.cljs already does (and D1 rejects an undefined bind).
++            username (or (aget claims "cognito:username") (aget claims "preferred_username"))
+             email-verified (cond
+                              (true? email-verified) 1
+                              (false? email-verified) 0
+--- a/deps/db-sync/worker/entry.mjs
++++ b/deps/db-sync/worker/entry.mjs
+@@ -183,6 +183,14 @@
+       return protectedResourceMetadata(request, env);
+     }
+     if (path === "/mcp/icon.png") return logseqIconResponse();
++    // logseq-flake: MCP clients (Claude Code, opencode) only start OAuth on a
++    // 401, and without a token every tool call fails anyway. No
++    // resource_metadata URL: clients then look under /.well-known of the URL
++    // they connected to, and wrangler would rewrite an absolute URL in a
++    // header back to its own listen address.
++    if (path === "/mcp" && !request.headers.get("authorization")) {
++      return new Response(null, { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
++    }
+     if (path === "/mcp") return handleMcp(ensureMcpAcceptHeader(request), env, ctx);
+     return worker.fetch(request, env, ctx);
+   },

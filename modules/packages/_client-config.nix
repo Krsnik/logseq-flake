@@ -10,9 +10,10 @@
   cognitoClientId = "LOGSEQ_OIDC_CLIENT_ID";
   # Answers POST /file-sync/user_info; point it at the web app.
   apiDomain = "LOGSEQ_API_DOMAIN";
-  syncHttpBase = "LOGSEQ_SYNC_HTTP_BASE";
-  syncWsUrl = "LOGSEQ_SYNC_WS_URL";
-  publishApiBase = "LOGSEQ_PUBLISH_API_BASE";
+  # The sync server, same form as its Settings field (https://host); the
+  # client derives the websocket URL from it.
+  syncUrl = "LOGSEQ_SYNC_URL";
+  publishUrl = "LOGSEQ_PUBLISH_URL";
   # Cognito only: another pool than upstream's.
   oauthDomain = "LOGSEQ_COGNITO_OAUTH_DOMAIN";
   cognitoIdp = "LOGSEQ_COGNITO_IDP";

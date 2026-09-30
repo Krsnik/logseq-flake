@@ -22,6 +22,7 @@
         // common.oidcOptions
         // (common.mkR2Options "logseq-publish-local")
         // {
+          dataDir = common.mkDataDirOption cfg;
           package = lib.mkOption {
             type = lib.types.package;
             defaultText = "inputs.logseq.packages.\${system}.logseq-publish";
@@ -42,16 +43,17 @@
             COGNITO_CLIENT_ID = cfg.oidcClientId;
             COGNITO_JWKS_URL = cfg.oidcJwksUrl;
             PUBLISH_PORT = toString cfg.port;
-            PUBLISH_DATA_DIR = "/var/lib/${cfg.serviceName}";
+            PUBLISH_DATA_DIR = cfg.dataDir;
             R2_ACCOUNT_ID = cfg.r2AccountId;
             R2_BUCKET = cfg.r2Bucket;
             R2_ACCESS_KEY_ID = cfg.r2AccessKeyId;
             R2_SECRET_ACCESS_KEY = cfg.r2SecretAccessKey;
           };
 
-          serviceConfig = common.mkUserServiceConfig cfg // {
+          unitConfig.RequiresMountsFor = [ cfg.dataDir ];
+
+          serviceConfig = common.mkUserServiceConfig cfg // common.mkDataDirServiceConfig cfg // {
             ExecStart = lib.getExe cfg.package;
-            StateDirectory = cfg.serviceName;
             Restart = "on-failure";
           };
         };

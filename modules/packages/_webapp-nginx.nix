@@ -113,6 +113,21 @@ writeShellApplication {
   # is configured at `docker run` time, with no rebuild. jq, not string
   # interpolation, because the values are URLs.
   text = ''
+    # Say so when a LOGSEQ_* variable isn't one of ours: a stale or misspelled
+    # name would otherwise silently leave that value at upstream's (and send
+    # the user's token to api.logseq.io). A warning, not an error, because one
+    # env file commonly serves the servers too (LOGSEQ_OIDC_JWKS_URL).
+    for var in "''${!LOGSEQ_@}"; do
+      case "$var" in
+        ${
+          lib.concatStringsSep "|" (
+            lib.attrValues (import ./_client-config.nix) ++ [ "LOGSEQ_OIDC_JWKS_URL" ]
+          )
+        }) ;;
+        *) echo "logseq-webapp: ignoring $var, not a setting (see _client-config.nix)" >&2 ;;
+      esac
+    done
+
     mkdir -p "$1/runtime/js"
     config=$(jq -cn --argjson baked ${lib.escapeShellArg (builtins.toJSON (webapp.clientConfig or { }))} \
       '$baked + ({ ${
