@@ -1,0 +1,22 @@
+--- a/src/electron/electron/plugin.cljs
++++ b/src/electron/electron/plugin.cljs
+@@ -128,10 +128,15 @@
+                                        (.on "error" (fn [^js e]
+                                                       (reject1 e)))
+                                        (.on "end" (fn [^js _e]
+-                                                    (.close dest-file)
+-                                                    (let [dest-file (string/replace tmp-dest-file ".pending" "")]
+-                                                      (fs/renameSync tmp-dest-file dest-file)
+-                                                      (resolve1 dest-file))))))))
++                                                    ;; logseq-flake: rename and extract only once the writes are
++                                                    ;; flushed. close returns before they are, and the zip was
++                                                    ;; extracted truncated ("end of central directory record
++                                                    ;; signature not found").
++                                                    (.end dest-file
++                                                          (fn []
++                                                            (let [dest-file (string/replace tmp-dest-file ".pending" "")]
++                                                              (fs/renameSync tmp-dest-file dest-file)
++                                                              (resolve1 dest-file))))))))))
+             ;; sync extract
+             zip-extracted-path (string/replace frm-zip ".zip" "")
+ 

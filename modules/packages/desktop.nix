@@ -275,6 +275,10 @@ let
         LOGSEQ_POSTHOG_TOKEN = "";
       };
 
+      # Upstream fix: plugin installs unzipped the download before it was
+      # fully written, and failed with a truncated zip.
+      patches = [ ./desktop.patch ];
+
       preConfigure = ''
         ${setupSources {
           packageJsons = [

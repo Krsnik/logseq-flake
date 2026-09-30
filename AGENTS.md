@@ -708,6 +708,10 @@ derivation: all four `drvPath`s were byte-identical before and after.
 - `modules/packages/self-hosting.patch` — the client-side patch, applied to
   every client build: runtime config, and device-flow sign-in and refresh
   against an OIDC provider when one is configured.
+- `modules/packages/desktop.patch` — an upstream bug fix for the desktop app
+  only: plugin installs unzipped the download before it was fully written
+  ("end of central directory record signature not found").
+  Timing-dependent, so upstream builds hit it too (same Electron 42).
 - `stdenv` vs `stdenvNoCC`, and `finalAttrs`: every `mkDerivation` in
   `modules/packages/` uses the `stdenv.mkDerivation (finalAttrs: {...})`
   form (self-referencing `finalAttrs.pname` etc. to kill duplicated
