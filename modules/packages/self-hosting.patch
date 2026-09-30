@@ -70,7 +70,7 @@
    const loadSession = async () => {
      try {
        const ret = await Auth.fetchAuthSession()
-@@ -208,6 +243,81 @@
+@@ -208,6 +243,85 @@
          </Button>
        </div>
      )
@@ -129,12 +129,16 @@
 +      return (
 +        <div className={'w-full flex flex-col items-center gap-4 text-center'}>
 +          <p>
-+            Open <a href={device.verification_uri_complete || device.verification_uri}
++            Open <a id={'oidc-verification'}
++                    href={device.verification_uri_complete || device.verification_uri}
 +                    target={'_blank'} rel={'noreferrer'} className={'underline'}>
 +              {device.verification_uri}
-+            </a> to sign in, and check that it shows this code:
++            </a> to sign in{device.verification_uri_complete ? '.' : ', and enter this code:'}
 +          </p>
-+          <p id={'oidc-user-code'} className={'text-2xl font-mono tracking-widest'}>{device.user_code}</p>
++          {/* The complete link carries the code already, and providers such as
++              Keycloak don't show it back, so it's only asked for without one. */}
++          {!device.verification_uri_complete &&
++            <p className={'text-2xl font-mono tracking-widest'}>{device.user_code}</p>}
 +          <Loader2Icon className={'animate-spin opacity-50'} size={16}/>
 +        </div>
 +      )

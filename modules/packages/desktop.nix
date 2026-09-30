@@ -363,7 +363,12 @@ let
 
       desktopItems = [
         (makeDesktopItem {
-          name = "Logseq";
+          # logseq.desktop, lowercase: on Wayland the window's app_id is
+          # "logseq" (--class only sets the X11 WM_CLASS), and GNOME matches a
+          # window to <app_id>.desktop by name, case-sensitively. As
+          # Logseq.desktop the window had no app, so no icon and no entry in
+          # the dash. StartupWMClass below still covers X11.
+          name = finalAttrs.pname;
           desktopName = "Logseq";
           exec = "${finalAttrs.pname} %U";
           terminal = false;

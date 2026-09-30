@@ -35,8 +35,9 @@ through. `LoginForm` becomes an OAuth 2.0 Device Authorization Grant (RFC 8628):
 
 1. Read `device_authorization_endpoint` and `token_endpoint` from discovery.
 2. POST the device endpoint (`client_id`, `scope=openid email profile`).
-3. Show `user_code` and a link to `verification_uri_complete`, which the user
-   opens in any browser. Password, MFA, brokering and sign-up all happen there.
+3. Show a link to `verification_uri_complete`, which the user opens in any
+   browser; it carries the code, which Keycloak does not display, so the
+   `user_code` is only shown when a provider sends no complete link. Password, MFA, brokering and sign-up all happen there.
 4. Poll the token endpoint with the device-code grant, honouring `interval`
    and `slow_down`, and stop if the dialog closes.
 5. Hand the tokens to `userSessionRender` in the shape `login-callback`

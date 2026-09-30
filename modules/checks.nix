@@ -317,18 +317,18 @@ in
                   # Starting the device flow gets a code from the realm, across
                   # origins, at the endpoint its discovery document names.
                   js("document.getElementById('oidc-sign-in').click()")
-                  wait_for_js("document.getElementById('oidc-user-code') !== null", timeout=60)
-                  user_code = js("document.getElementById('oidc-user-code').textContent")
+                  wait_for_js("document.getElementById('oidc-verification') !== null", timeout=60)
+                  link = js("document.getElementById('oidc-verification').href")
 
-                  # The user's half, on the IdP's own pages: open the verification
-                  # link, then submit whatever Keycloak shows (login, then
-                  # consent) until it stops showing forms. The app polls meanwhile.
+                  # The user's half, on the IdP's own pages: open the link the app
+                  # shows (verification_uri_complete, code included), then submit
+                  # whatever Keycloak shows (login, then consent) until it stops
+                  # showing forms. The app polls meanwhile.
                   def keycloak(args):
                       return machine.succeed(f"curl -sSL -b /tmp/kc -c /tmp/kc {args}")
 
-                  page = keycloak(
-                      f"'http://localhost:${toString keycloakPort}/realms/logseq/device?user_code={user_code}'"
-                  )
+                  assert "user_code=" in link, link
+                  page = keycloak(f"'{link}'")
                   for _ in range(4):
                       form = re.search(r'<form[^>]*action="([^"]+)"', page)
                       if not form:
@@ -720,7 +720,7 @@ in
 
               # StartupWMClass must stay in sync with the wrapper's --class=Logseq,
               # or the taskbar shows a generic icon while the app picker looks fine.
-              grep -q '^StartupWMClass=Logseq$' "$app/share/applications/Logseq.desktop"
+              grep -q '^StartupWMClass=Logseq$' "$app/share/applications/logseq.desktop"
 
               # The CLI half runs headless, so actually run it.
               node "$app/share/logseq/logseq-cli.js" --help | grep -q '^Usage: logseq'

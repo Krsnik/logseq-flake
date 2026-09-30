@@ -47,7 +47,7 @@
         home.packages = [ cfg.package ];
 
         xdg.autostart.entries = lib.mkIf cfg.autostart [
-          "${cfg.package}/share/applications/Logseq.desktop"
+          "${cfg.package}/share/applications/logseq.desktop"
         ];
       };
     };

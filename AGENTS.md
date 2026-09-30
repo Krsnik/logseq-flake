@@ -66,7 +66,7 @@ started (see "Container images" below).
 Fully done: pure (every dependency is a fetcher-shaped FOD — no
 `outputHash` on anything that also compiles), configurable identity
 provider and sync/publish endpoints via `clientConfig`, the app-picker/
-taskbar icon mismatch fixed (`--class=Logseq` in the wrapper), the
+taskbar icon mismatch fixed (`--class=Logseq` in the wrapper for X11, and the desktop file named `logseq.desktop` after the Wayland `app_id`), the
 `clojure` package's `getExe` eval warning gone (CLI built from source via
 `ocamlPackages` instead of patching a bundle). The Wayland/Vulkan ozone
 warning at startup is upstream Chromium noise, not a packaging bug.
@@ -83,7 +83,7 @@ in NixOS/home-manager. The home-manager module additionally has
 `autostart` (`xdg.autostart.entries`, gated — like upstream
 `programs.keepassxc`'s own `autostart` — on the *separate*
 `xdg.autostart.enable` switch, and the package already ships
-`share/applications/Logseq.desktop`, so nothing extra needs installing for
+`share/applications/logseq.desktop`, so nothing extra needs installing for
 this to point at). Verified for real, not just written: evaluated both
 modules directly (`nixosSystem`/`homeManagerConfiguration`, not a build) —
 confirmed `enable` lands the package in `environment.systemPackages`/
