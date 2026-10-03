@@ -203,6 +203,11 @@ claude mcp add --transport http --client-id logseq --callback-port 47111 logseq 
 (the second is opencode's `opencode.json`; `opencode mcp auth logseq` signs in). `checks.sync-worker` runs both
 clients' sign-ins against the realm and calls the API directly and through MCP. It doesn't run the clients themselves.
 
+The API and MCP only see graphs that are **not** end-to-end encrypted (the server can't read the others; it answers
+`409 semantic-api-unavailable-for-e2ee`). Encryption is fixed when a graph is first uploaded. Upstream lets you choose it
+only when creating a new synced graph; uploading an existing local graph (e.g. an imported one) always encrypted it.
+The patched clients add an **Encrypt data** checkbox to the upload dialog too, so either kind of graph can go up either way.
+
 ## More detail
 
 `AGENTS.md` has the full internals: how each package is built, every check

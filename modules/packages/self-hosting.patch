@@ -182,6 +182,39 @@
  <script src="./js/magic_portal.js"></script>
  <script defer src="./js/highlight.min.js"></script>
  <script defer src="./js/interact.min.js"></script>
+--- a/src/main/frontend/components/repo.cljs
++++ b/src/main/frontend/components/repo.cljs
+@@ -58,14 +58,27 @@
+   [{:keys [url] :as graph}]
+   (let [graph-name (config/db-graph-name url)
+         dialog-config {:cancel-label (t :ui/cancel)
+-                       :ok-label (t :ui/confirm)}]
++                       :ok-label (t :ui/confirm)}
++        ;; logseq-flake: let the user choose, like the new-graph dialog does.
++        ;; Upstream always took the graph's flag, and a graph without one
++        ;; (e.g. imported) could only be uploaded encrypted.
++        *graph-e2ee? (atom (graph-e2ee-enabled? graph))]
+     (-> (shui/dialog-confirm!
+-         [:p.font-medium.-my-4 (t :graph/upload-local-confirm-desc graph-name)]
++         [:div.flex.flex-col.gap-4
++          [:p.font-medium.-mt-4 (t :graph/upload-local-confirm-desc graph-name)]
++          [:div.flex.flex-row.items-center.gap-1
++           (shui/checkbox
++            {:id "upload-graph-e2ee"
++             :default-checked @*graph-e2ee?
++             :on-checked-change #(reset! *graph-e2ee? (true? %))})
++           [:label.opacity-70.text-sm
++            {:for "upload-graph-e2ee"}
++            (t :graph/encrypt-data-label)]]]
+          dialog-config)
+         (p/then
+          (fn []
+            (p/let [_ (<ensure-current-graph-for-upload! url)
+-                   graph-e2ee? (graph-e2ee-enabled? graph)]
++                   graph-e2ee? @*graph-e2ee?]
+              (let [mobile? (util/mobile?)
+                    hide-upload-log! (fn []
+                                       (when mobile?
 --- a/src/main/frontend/components/user/login.cljs
 +++ b/src/main/frontend/components/user/login.cljs
 @@ -32,7 +32,8 @@

@@ -194,7 +194,16 @@ data rather than errors, all proven by `checks.sync-worker`:
 The realm side (scopes, audience) is in the README's "REST API and MCP" and
 `examples/keycloak.nix`. MCP clients reuse the realm's public `logseq`
 client (Claude Code `--client-id`, opencode `oauth.clientId`), so `aud`
-stays `logseq` without `COGNITO_CLIENT_IDS`. Not run: the real Claude Code
+stays `logseq` without `COGNITO_CLIENT_IDS`. Both only serve graphs that
+are not end-to-end encrypted (`dispatch.cljs`: 409
+`semantic-api-unavailable-for-e2ee`; `listGraphs` filters them out).
+Upstream's upload of an existing local graph had no encryption choice
+(`components/repo.cljs` `graph-e2ee-enabled?`: a graph without
+`:logseq.kv/graph-rtc-e2ee?`, e.g. an imported one, defaults to encrypted;
+the CLI's `sync upload` behaves the same), so such a graph could never
+become MCP-readable. `self-hosting.patch` adds the new-graph dialog's
+**Encrypt data** checkbox to the upload confirmation, defaulting to the old
+behavior. Not run: the real Claude Code
 and opencode binaries (the check replays their OAuth requests), and dynamic
 client registration (Keycloak's anonymous-registration policies would need
 configuring, and a registered client's `aud` would differ).
@@ -719,8 +728,10 @@ derivation: all four `drvPath`s were byte-identical before and after.
   `LOGSEQ_*` variable: the one list the build, the runner and the NixOS
   module check against.
 - `modules/packages/self-hosting.patch` — the client-side patch, applied to
-  every client build: runtime config, and device-flow sign-in and refresh
-  against an OIDC provider when one is configured.
+  every client build: runtime config, device-flow sign-in and refresh
+  against an OIDC provider when one is configured, and an encryption choice
+  when uploading an existing local graph (see "Sync worker": unencrypted
+  graphs are the only ones the API/MCP can serve).
 - `modules/packages/desktop.patch` — an upstream bug fix for the desktop app
   only: plugin installs unzipped the download before it was fully written
   ("end of central directory record signature not found").
