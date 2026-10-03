@@ -203,7 +203,10 @@ Upstream's upload of an existing local graph had no encryption choice
 the CLI's `sync upload` behaves the same), so such a graph could never
 become MCP-readable. `self-hosting.patch` adds the new-graph dialog's
 **Encrypt data** checkbox to the upload confirmation, defaulting to the old
-behavior. Not run: the real Claude Code
+behavior, and passes the choice through to the worker: upstream's
+`<rtc-upload-graph!` took a `graph-e2ee?` argument but ignored it, and the
+worker's `upload-graph!` read the graph's flag itself (now: the argument
+when given, the flag otherwise, so the CLI is unchanged). Not run: the real Claude Code
 and opencode binaries (the check replays their OAuth requests), and dynamic
 client registration (Keycloak's anonymous-registration policies would need
 configuring, and a registered client's `aud` would differ).

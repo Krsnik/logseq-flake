@@ -286,6 +286,26 @@
  
  (defn db-sync-http-base
    "Return the HTTP base URL for sync. Uses custom server when configured, otherwise the default."
+--- a/src/main/frontend/handler/db_based/sync.cljs
++++ b/src/main/frontend/handler/db_based/sync.cljs
+@@ -419,13 +419,15 @@
+                           :graph-uuid graph-uuid}))))
+ 
+ (defn <rtc-upload-graph!
+-  [repo _graph-e2ee?]
++  [repo graph-e2ee?]
+   (if-let [operation (active-graph-operation)]
+     (reject-graph-operation-in-progress :upload operation)
+     (do
+       (state/set-state! :rtc/uploading? true)
+       (-> (p/let [_ (<sync-auth-state-to-db-worker!)
+-                  _ (state/<invoke-db-worker :thread-api/db-sync-upload-graph repo)
++                  ;; logseq-flake: pass the upload dialog's encryption choice on;
++                  ;; upstream ignored it and the worker used the graph's flag.
++                  _ (state/<invoke-db-worker :thread-api/db-sync-upload-graph repo graph-e2ee?)
+                   _ (<get-remote-graphs)
+                   _ (state/set-state! :rtc/uploading? false)
+                   _ (<rtc-start! repo)]
 --- a/src/main/frontend/handler/user.cljs
 +++ b/src/main/frontend/handler/user.cljs
 @@ -41,7 +41,11 @@
@@ -366,6 +386,19 @@
  
  (defn restore-tokens-from-localstorage
    "Refresh id-token&access-token, pull latest repos, returns nil when tokens are not available."
+--- a/src/main/frontend/worker/db_core.cljs
++++ b/src/main/frontend/worker/db_core.cljs
+@@ -776,8 +776,8 @@
+   (db-sync/list-remote-graphs!))
+ 
+ (def-thread-api :thread-api/db-sync-upload-graph
+-  [repo]
+-  (db-sync/upload-graph! repo))
++  [repo & [graph-e2ee?]]
++  (db-sync/upload-graph! repo graph-e2ee?))
+ 
+ (def-thread-api :thread-api/db-sync-create-remote-graph
+   [repo graph-e2ee? graph-ready-for-use?]
 --- a/src/main/frontend/worker/pipeline.cljs
 +++ b/src/main/frontend/worker/pipeline.cljs
 @@ -398,7 +398,8 @@
@@ -378,6 +411,19 @@
          email (:email decoded-id-token)
          now (common-util/time-ms)]
      {:block/uuid (uuid user-uuid)
+--- a/src/main/frontend/worker/sync.cljs
++++ b/src/main/frontend/worker/sync.cljs
+@@ -443,8 +443,8 @@
+   (sync-apply/rehydrate-large-titles-from-db! repo graph-id))
+ 
+ (defn upload-graph!
+-  [repo]
+-  (sync-upload/upload-graph! repo))
++  [repo & [graph-e2ee?]]
++  (sync-upload/upload-graph! repo graph-e2ee?))
+ 
+ (defn create-remote-graph!
+   [repo opts]
 --- a/src/main/frontend/worker/sync/auth.cljs
 +++ b/src/main/frontend/worker/sync/auth.cljs
 @@ -38,9 +38,11 @@
@@ -395,3 +441,27 @@
  
  (defn <refresh-id&access-token
    []
+--- a/src/main/frontend/worker/sync/upload.cljs
++++ b/src/main/frontend/worker/sync/upload.cljs
+@@ -348,7 +348,7 @@
+                                              :graph-ready-for-use? graph-ready-for-use?})))))))
+ 
+ (defn upload-graph!
+-  [repo]
++  [repo & [graph-e2ee?]]
+   (let [base (http-base-url)
+         update-progress (fn [payload]
+                           (worker-util/post-message :rtc-log
+@@ -358,7 +358,11 @@
+       (p/rejected (ex-info "db-sync missing base"
+                            {:repo repo :base base}))
+       (if-let [source-conn (worker-state/get-datascript-conn repo)]
+-        (p/let [graph-e2ee? (normalize-graph-e2ee? (sync-crypt/graph-e2ee? repo))
++        ;; logseq-flake: the caller's choice when given (the upload dialog),
++        ;; else the graph's flag as upstream (the CLI's `sync upload`).
++        (p/let [graph-e2ee? (normalize-graph-e2ee? (if (some? graph-e2ee?)
++                                                     graph-e2ee?
++                                                     (sync-crypt/graph-e2ee? repo)))
+                 {:keys [graph-id]} (create-remote-graph! repo {:graph-e2ee? graph-e2ee?
+                                                                :graph-ready-for-use? false})]
+           (p/let [aes-key (when graph-e2ee?
