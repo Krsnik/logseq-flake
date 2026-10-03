@@ -175,7 +175,14 @@ let
       # below, via buildPhase) so the captured lockfile covers everything
       # the real build resolves, not just configuration-time deps.
       gradleUpdateTask = "assembleRelease";
-      gradleFlags = [ "-Pandroid.aapt2FromMavenOverride=${aapt2}" ];
+      gradleFlags = [
+        "-Pandroid.aapt2FromMavenOverride=${aapt2}"
+        # Release lint fetches maven.google.com's master-/group-index.xml (live
+        # version listings for its "newer version available" check); pinning
+        # those in android-deps.json breaks on every upstream release.
+        "-x"
+        "lintVitalRelease"
+      ];
 
       mitmCache = gradle.fetchDeps {
         pname = finalAttrs.pname;
