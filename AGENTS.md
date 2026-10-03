@@ -522,7 +522,10 @@ refresh rotates in (upstream drops it; a Keycloak refresh token dies at its
 own `exp` however often it is used). The realm user needs the
 `offline_access` role, or Keycloak answers `not_allowed` with no CORS
 headers, which the app shows as "Failed to fetch". `checks.login` asserts
-both from Keycloak's side.
+both from Keycloak's side. On Android the app sits in the background while
+the user signs in in the browser, and its polls fail as network errors
+without reaching the IdP (seen in production's nginx log); the poll loop
+retries those, and `checks.login` fails polls the same way.
 **`user_info` is proven load-bearing**, and the web app's nginx now serves the
 stub for it (point `apiDomain` at the web app). `checks.login` proves all of
 it for the web app. **Desktop and Android run the same compiled code but are

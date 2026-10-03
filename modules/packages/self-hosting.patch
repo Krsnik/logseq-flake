@@ -70,7 +70,7 @@
    const loadSession = async () => {
      try {
        const ret = await Auth.fetchAuthSession()
-@@ -208,6 +243,85 @@
+@@ -208,6 +243,91 @@
          </Button>
        </div>
      )
@@ -91,9 +91,15 @@
 +      const deadline = Date.now() + grant.expires_in * 1000
 +      while (!cancelled.current && Date.now() < deadline) {
 +        await new Promise(resolve => setTimeout(resolve, interval))
++        // A network error is no answer, so poll again: Android cuts the app
++        // off while the user signs in in the browser (in production, not
++        // one poll reached the server until the app was back in front).
 +        const { ok, body } = await oauthPost(token_endpoint, {
 +          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
 +          device_code: grant.device_code
++        }).catch(e => {
++          if (e instanceof TypeError) return { ok: false, body: { error: 'authorization_pending' } }
++          throw e
 +        })
 +        if (ok) {
 +          const claims = jwtClaims(body.id_token)

@@ -324,6 +324,19 @@ in
                   wait_for_js("document.getElementById('oidc-verification') !== null", timeout=60)
                   link = js("document.getElementById('oidc-verification').href")
 
+                  # Android cuts the app off while the user is in the browser:
+                  # its polls fail as network errors (TypeError) and never
+                  # reach the IdP. Sign-in has to survive that, so fail them
+                  # here until one has, and through the user's login below.
+                  js(
+                      "window.realFetch = fetch, window.failedPolls = 0,"
+                      " window.fetch = (url, init) => String(url).endsWith('/token')"
+                      "   ? (window.failedPolls++, Promise.reject(new TypeError('Failed to fetch')))"
+                      "   : window.realFetch(url, init),"
+                      " true"
+                  )
+                  wait_for_js("window.failedPolls > 0", timeout=60)
+
                   # The user's half, on the IdP's own pages: open the link the app
                   # shows (verification_uri_complete, code included), then submit
                   # whatever Keycloak shows (login, then consent) until it stops
@@ -356,6 +369,7 @@ in
                       )
                       page = keycloak(f"{data} {shlex.quote(action)}")
                   assert "Device Login Successful" in page, page
+                  js("window.fetch = window.realFetch, true")
 
                   # The app now holds the realm's tokens, including the refresh
                   # token logged-in? keys off...
