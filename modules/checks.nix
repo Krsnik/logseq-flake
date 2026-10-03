@@ -115,7 +115,7 @@ in
 
             body = jsonlib.loads(
                 machine.succeed(
-                    "curl -sSf -d grant_type=password -d client_id=logseq -d scope=openid"
+                    "curl -sSf -d grant_type=password -d client_id=logseq -d 'scope=openid offline_access'"
                     " -d username=test -d password=test"
                     " http://localhost:${toString keycloakPort}/realms/logseq/protocol/openid-connect/token"
                 )
@@ -124,6 +124,9 @@ in
             # logged in on the refresh token specifically.
             for key in ["id_token", "access_token", "refresh_token"]:
                 assert key in body, f"token response has no {key}: {sorted(body)}"
+            # The apps ask for offline_access, so they stay signed in past the
+            # SSO session; the user needs the role for it (defaultRole).
+            assert claims(body["refresh_token"])["typ"] == "Offline", claims(body["refresh_token"])
 
             # The claims the clients read off the id token. The user name is the
             # standard preferred_username: the patches fall back to it when
@@ -248,6 +251,7 @@ in
             };
 
             testScript = ''
+              import base64
               import html
               import json
               import re
@@ -373,6 +377,14 @@ in
                       )
                   )
                   assert refreshes, "the app never refreshed its token"
+                  # Staying signed in: the app asked for offline_access, and
+                  # kept the refresh token the refresh rotated in (Keycloak's
+                  # newest event first), not the one it signed in with, whose
+                  # own exp would sign it out regardless.
+                  stored = js("localStorage.getItem('refresh-token')").split(".")[1]
+                  stored = json.loads(base64.urlsafe_b64decode(stored + "=" * (-len(stored) % 4)))
+                  assert stored["typ"] == "Offline", stored["typ"]
+                  assert stored["jti"] == refreshes[0]["details"]["updated_refresh_token_id"], (stored, refreshes[0])
               except Exception:
                   print(machine.execute("journalctl -u chromium --no-pager | grep CONSOLE | tail -n 60")[1])
                   print(machine.execute("tail -n 50 /var/log/nginx/access.log")[1])

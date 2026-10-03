@@ -26,6 +26,9 @@
         "logseq/read",
         "logseq/write"
       ],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
       "protocolMappers": [
         {
           "name": "logseq-audience",
@@ -131,6 +134,14 @@
         "include.in.token.scope": "true"
       },
       "protocolMappers": []
+    },
+    {
+      "name": "offline_access",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": []
     }
   ],
   "users": [
@@ -142,6 +153,9 @@
       "firstName": "Test",
       "lastName": "User",
       "requiredActions": [],
+      "realmRoles": [
+        "offline_access"
+      ],
       "credentials": [
         {
           "type": "password",

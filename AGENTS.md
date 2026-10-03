@@ -515,6 +515,14 @@ provider's discovery document, runs the device grant, and hands
 Cognito form and refresh run unchanged, so the same generic bundle serves
 both. Everything else downstream is upstream's own. The provider needs the
 device grant on a public client, and CORS for the app origins.
+**Staying signed in** needs two things a Cognito-shaped client lacks: it
+asks for `offline_access` (the refresh token then outlives the SSO
+session, 30 minutes idle by default), and it keeps the refresh token each
+refresh rotates in (upstream drops it; a Keycloak refresh token dies at its
+own `exp` however often it is used). The realm user needs the
+`offline_access` role, or Keycloak answers `not_allowed` with no CORS
+headers, which the app shows as "Failed to fetch". `checks.login` asserts
+both from Keycloak's side.
 **`user_info` is proven load-bearing**, and the web app's nginx now serves the
 stub for it (point `apiDomain` at the web app). `checks.login` proves all of
 it for the web app. **Desktop and Android run the same compiled code but are
@@ -592,6 +600,8 @@ for the detail and traps). Remaining, roughly in order of value:
 1. **Sign-out ends the app session, not the IdP's.** Amplify's `signOut` has
    no tokens to revoke, so signing in again skips the IdP password prompt
    while its session cookie lives. Probably fine; revisit if it isn't.
+   It also leaves the offline session (and its refresh token) alive on
+   Keycloak until it idles out after 30 days.
 
 ### 2. Literals `clientConfig` still misses
 

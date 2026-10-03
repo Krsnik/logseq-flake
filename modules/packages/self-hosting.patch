@@ -84,7 +84,7 @@
 +      if (!device_authorization_endpoint) {
 +        throw new Error(`${authConfig.oidcIssuer} does not offer the OAuth device flow.`)
 +      }
-+      const { body: grant } = await oauthPost(device_authorization_endpoint, { scope: 'openid email profile' })
++      const { body: grant } = await oauthPost(device_authorization_endpoint, { scope: 'openid email profile offline_access' })
 +      if (!grant.device_code) throw new Error(grant.error_description || grant.error || JSON.stringify(grant))
 +      setDevice(grant)
 +      let interval = (grant.interval || 5) * 1000
@@ -313,6 +313,20 @@
  
  (defn <refresh-id-token&access-token
    "Refresh id-token and access-token"
+@@ -227,7 +254,12 @@
+ 
+           :else                         ; ok
+           (when (and (:id_token (:body resp)) (:access_token (:body resp)))
+-            (set-tokens! (:id_token (:body resp)) (:access_token (:body resp)))))))))
++            ;; logseq-flake: keep the refresh token the provider rotated in.
++            ;; Cognito sends none; an OIDC provider's old one expires at its
++            ;; own exp however often it's used, which signed users out.
++            (if-let [refresh-token (:refresh_token (:body resp))]
++              (set-tokens! (:id_token (:body resp)) (:access_token (:body resp)) refresh-token)
++              (set-tokens! (:id_token (:body resp)) (:access_token (:body resp))))))))))
+ 
+ (defn restore-tokens-from-localstorage
+   "Refresh id-token&access-token, pull latest repos, returns nil when tokens are not available."
 --- a/src/main/frontend/worker/pipeline.cljs
 +++ b/src/main/frontend/worker/pipeline.cljs
 @@ -398,7 +398,8 @@

@@ -95,7 +95,13 @@
     # `logseq/write` in the access token's `scope`, so the realm declares
     # them as client scopes. Declaring any stops Keycloak from creating its
     # built-in ones, hence `basic`/`profile`/`email` alongside, carrying
-    # only the claims Logseq reads.
+    # only the claims Logseq reads — and `offline_access`, which the apps
+    # request at sign-in so their refresh token outlives the SSO session
+    # (30 minutes idle by default): an offline session idles out after 30
+    # days unused instead, and every refresh renews it. Each user needs the
+    # `offline_access` role in `realmRoles`: Keycloak rejects the grant with a
+    # `not_allowed` that carries no CORS headers (the app sees "Failed to
+    # fetch"), and an import ignores composites given in `defaultRole`.
     #
     # The test user also needs firstName/lastName: without them Keycloak's
     # VERIFY_PROFILE required action blocks every login with
