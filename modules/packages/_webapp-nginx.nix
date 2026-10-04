@@ -76,6 +76,14 @@ let
         location / {
           try_files $uri $uri/ /index.html;
         }
+        # Store paths have mtime 1, so Last-Modified is 1970 and browsers cache
+        # the page heuristically for years. A cached page keeps the address
+        # space it was first fetched from: loaded via the public IP, then
+        # opened on the LAN, Chrome's Local Network Access blocks its requests
+        # to the LAN-resolved auth server. Refetch it on every load.
+        location = /index.html {
+          add_header Cache-Control no-store;
+        }
 
         # The one piece of upstream's account API the logged-in flow cannot do
         # without. :user/fetch-info-and-graphs (frontend/handler/events/ui.cljs)
